@@ -16,7 +16,8 @@ retirement-assistant/
 │   ├── setup_db.py
 │   ├── add_appointment.py
 │   ├── add_event.py
-│   └── add_activity.py
+│   ├── add_activity.py
+│   └── update_activity.py
 ├── settings.example.json
 ├── settings.local.json
 ├── requirements.txt
@@ -52,7 +53,8 @@ for personal data storage. Your local DB file is configured as:
 	```powershell
 	python scripts/add_appointment.py --title "Dentist" --appt-dt "2026-06-17T09:00" --location "Main St Clinic"
 	python scripts/add_event.py --title "Summer Festival" --start-date "2026-06-23" --end-date "2026-06-28"
-	python scripts/add_activity.py --title "Morning Walk" --category "outdoor" --weather-sensitive 1 --physical-intensity 1
+	python scripts/add_activity.py --title "Morning Walk" --category "outdoor" --weather-sensitive 1 --physical-intensity 1 --url "https://example.com/trail"
+	python scripts/update_activity.py 1 --location "Watershed Trailhead" --url "https://example.com/parking" --url "https://example.com/map"
 	```
 
 4. Start the MCP server (stdio):
@@ -75,7 +77,11 @@ After the MCP server is running, you can type prompts like:
 
 - Add appointment title "Dentist" at "2026-06-17T09:00" location "Main St Clinic" notes "Bring insurance card"
 - Add timed event title "Summer Festival" start "2026-06-23" end "2026-06-28" description "Community event"
-- Add activity title "Morning Walk" category "outdoor" weather_sensitive 1 physical_intensity 1
+- Add activity title "Morning Walk" category "outdoor" weather_sensitive 1 physical_intensity 1 urls ["https://example.com/trail"]
+- Update activity id 1 location "Watershed Trailhead" urls ["https://example.com/parking", "https://example.com/map"]
+- Give me details for activity 1
+- Give me activity details for "Visit Grateful Bread"
+- Get daily briefing for 2026-06-10 rain_chance 40 readiness 25
 - Log activity id 3 status done notes "30 minute walk"
 - Get daily briefing for 2026-06-09
 
@@ -86,3 +92,5 @@ Available MCP tools now include:
 - `add_appointment`
 - `add_timed_event`
 - `add_activity`
+- `update_activity`
+- `get_activity_details`

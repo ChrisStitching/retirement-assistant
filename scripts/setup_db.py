@@ -20,6 +20,22 @@ def resolve_settings_path(settings_arg: str | None) -> Path:
     return Path("settings.example.json")
 
 
+def migrate_schema(conn: sqlite3.Connection) -> None:
+    conn.execute("PRAGMA foreign_keys = ON")
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS activity_urls (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            activity_id INTEGER NOT NULL REFERENCES activities(id) ON DELETE CASCADE,
+            url         TEXT NOT NULL,
+            label       TEXT,
+            created_at  TEXT DEFAULT (datetime('now'))
+        )
+        """
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Initialize the retirement assistant SQLite database.")
     parser.add_argument(
@@ -40,6 +56,7 @@ def main() -> None:
 
     with sqlite3.connect(db_path) as conn:
         conn.executescript(schema_sql)
+        migrate_schema(conn)
         conn.commit()
 
     print(f"Database initialized at: {db_path}")

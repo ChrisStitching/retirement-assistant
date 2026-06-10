@@ -131,6 +131,8 @@ CREATE TABLE activity_log (
 | `complete_timed_event(id)` | Marks a timed event done/dismissed | Yes |
 | `log_activity(id, status, date)` | Records what you did | Yes |
 | `list_activities()` | Returns the full activity pool | Yes |
+| `update_activity(id, ...)` | Updates an existing activity and replaces its URL list when provided | Yes |
+| `get_activity_details(id/title)` | Returns one activity with URLs, last visited date, and latest log notes | Yes |
 | `add_appointment(...)` | Adds a new appointment | Yes — add_appointment.py |
 
 The MCP tools are thin wrappers. The SQL logic lives in shared modules so both the MCP server and the standalone scripts use the same code.

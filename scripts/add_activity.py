@@ -20,10 +20,12 @@ def main() -> None:
     parser.add_argument("--category", default="")
     parser.add_argument("--weather-sensitive", type=int, default=0, choices=[0, 1])
     parser.add_argument("--physical-intensity", type=int, default=1, choices=[1, 2, 3])
+    parser.add_argument("--url", dest="urls", action="append", default=[])
     args = parser.parse_args()
 
     db_path = load_db_path()
     with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
         conn.execute(
             """
             INSERT INTO activities (
@@ -45,9 +47,17 @@ def main() -> None:
                 args.physical_intensity,
             ),
         )
+        activity_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        urls = [url.strip() for url in args.urls if url and url.strip()]
+        if urls:
+            conn.executemany(
+                "INSERT INTO activity_urls (activity_id, url) VALUES (?, ?)",
+                [(activity_id, url) for url in urls],
+            )
         conn.commit()
 
     print("Activity added.")
+
 
 
 if __name__ == "__main__":

@@ -30,6 +30,14 @@ CREATE TABLE IF NOT EXISTS activities (
     physical_intensity  INTEGER DEFAULT 1
 );
 
+CREATE TABLE IF NOT EXISTS activity_urls (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    activity_id INTEGER NOT NULL REFERENCES activities(id) ON DELETE CASCADE,
+    url         TEXT NOT NULL,
+    label       TEXT,
+    created_at  TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS activity_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     activity_id INTEGER REFERENCES activities(id),
