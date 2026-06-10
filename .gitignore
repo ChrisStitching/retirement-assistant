@@ -1,0 +1,19 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Local environment and secrets
+settings.local.json
+.env
+
+# Local SQLite data
+*.db
+*.sqlite
+*.sqlite3
+
+# VS Code
+.vscode/settings.json

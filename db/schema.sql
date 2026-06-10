@@ -1,0 +1,39 @@
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS appointments (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    title       TEXT NOT NULL,
+    location    TEXT,
+    appt_dt     TEXT NOT NULL,
+    notes       TEXT,
+    created_at  TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS timed_events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    title       TEXT NOT NULL,
+    description TEXT,
+    url         TEXT,
+    start_date  TEXT NOT NULL,
+    end_date    TEXT NOT NULL,
+    status      TEXT DEFAULT 'active',
+    created_at  TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS activities (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    title               TEXT NOT NULL,
+    description         TEXT,
+    location            TEXT,
+    category            TEXT,
+    weather_sensitive   INTEGER DEFAULT 0,
+    physical_intensity  INTEGER DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS activity_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    activity_id INTEGER REFERENCES activities(id),
+    log_date    TEXT NOT NULL,
+    status      TEXT,
+    notes       TEXT
+);
