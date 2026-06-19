@@ -148,3 +148,6 @@ Copyright © 2026 Christine Johnson
 
 If this project sparks ideas or you'd like to connect,  
 you're welcome to reach out on [LinkedIn](https://www.linkedin.com/in/chrisjohnsonwa).
+
+This repository is public for reference and inspiration.
+Issues and pull requests are intentionally disabled.
