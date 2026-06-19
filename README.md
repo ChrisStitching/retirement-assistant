@@ -32,6 +32,11 @@ retirement-assistant/
 └── .gitignore
 ```
 
+## Documentation
+
+- [Project Design](documentation/design.md)
+- [Troubleshooting Guide](documentation/troubleshooting.md)
+
 ## Local Settings
 
 Use `settings.local.json` for personalized local paths and environment-specific values.
