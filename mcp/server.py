@@ -2,10 +2,18 @@ from __future__ import annotations
 
 import json
 import logging
+import ssl
 import sqlite3
 from datetime import date as date_type
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
+from urllib.request import urlopen
+
+try:
+    import certifi
+except ImportError:
+    certifi = None
 
 from mcp.server.fastmcp import FastMCP
 
@@ -14,8 +22,25 @@ logging.getLogger("mcp.server.lowlevel.server").setLevel(logging.WARNING)
 
 
 def _load_settings() -> dict[str, Any]:
-    local_path = Path("settings.local.json")
-    settings_path = local_path if local_path.exists() else Path("settings.example.json")
+    repo_root = Path(__file__).resolve().parent.parent
+    local_candidates = [Path("settings.local.json"), repo_root / "settings.local.json"]
+    example_candidates = [Path("settings.example.json"), repo_root / "settings.example.json"]
+
+    settings_path: Path | None = None
+    for candidate in local_candidates:
+        if candidate.exists():
+            settings_path = candidate
+            break
+
+    if settings_path is None:
+        for candidate in example_candidates:
+            if candidate.exists():
+                settings_path = candidate
+                break
+
+    if settings_path is None:
+        raise FileNotFoundError("Unable to locate settings.local.json or settings.example.json")
+
     return json.loads(settings_path.read_text(encoding="utf-8"))
 
 
@@ -195,7 +220,11 @@ def _get_activity_details(
     }
 
 
-def _activity_recommendation_clauses(rain_chance: int | None = None, readiness: int | None = None) -> list[str]:
+def _activity_recommendation_clauses(
+    rain_chance: int | None = None,
+    readiness: int | None = None,
+    temp_f_high: float | None = None,
+) -> list[str]:
     clauses: list[str] = []
 
     if rain_chance is not None and rain_chance > 30:
@@ -209,7 +238,88 @@ def _activity_recommendation_clauses(rain_chance: int | None = None, readiness: 
         else:
             clauses.append("a.physical_intensity IN (2, 3)")
 
+    if temp_f_high is not None:
+        if temp_f_high < 55:
+            clauses.append("lower(coalesce(a.category, '')) != 'motorcycle'")
+        if temp_f_high > 75:
+            clauses.append("a.physical_intensity != 3")
+        if temp_f_high > 85:
+            clauses.append("NOT (a.physical_intensity = 2 AND a.weather_sensitive = 1)")
+
     return clauses
+
+
+def _fetch_weather_for_date(target_date: str) -> dict[str, Any] | None:
+    settings = _load_settings()
+    weather_settings = settings.get("weather")
+    if not isinstance(weather_settings, dict):
+        return None
+
+    if not bool(weather_settings.get("enabled", False)):
+        return None
+
+    latitude = weather_settings.get("latitude")
+    longitude = weather_settings.get("longitude")
+    if latitude is None or longitude is None:
+        return None
+
+    try:
+        params = {
+            "latitude": float(latitude),
+            "longitude": float(longitude),
+            "timezone": str(weather_settings.get("timezone") or "auto"),
+            "daily": "precipitation_probability_max,temperature_2m_max,temperature_2m_min",
+            "start_date": target_date,
+            "end_date": target_date,
+        }
+        url = "https://api.open-meteo.com/v1/forecast?" + urlencode(params)
+        ssl_context = (
+            ssl.create_default_context(cafile=certifi.where())
+            if certifi is not None
+            else ssl.create_default_context()
+        )
+        with urlopen(url, timeout=8, context=ssl_context) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        if certifi is None:
+            logging.warning("Weather lookup failed (certifi not installed): %s", exc)
+        else:
+            logging.warning("Weather lookup failed: %s", exc)
+        return None
+
+    daily = payload.get("daily")
+    if not isinstance(daily, dict):
+        return None
+
+    times = daily.get("time")
+    if not isinstance(times, list) or target_date not in times:
+        return None
+
+    date_index = times.index(target_date)
+
+    def _value_at(values: Any, index: int) -> float | None:
+        if not isinstance(values, list) or index >= len(values):
+            return None
+        raw_value = values[index]
+        if raw_value is None:
+            return None
+        try:
+            return float(raw_value)
+        except (TypeError, ValueError):
+            return None
+
+    rain_chance = _value_at(daily.get("precipitation_probability_max"), date_index)
+    temp_c_max = _value_at(daily.get("temperature_2m_max"), date_index)
+    temp_c_min = _value_at(daily.get("temperature_2m_min"), date_index)
+
+    return {
+        "source": "open-meteo",
+        "rain_chance": int(round(rain_chance)) if rain_chance is not None else None,
+        "temperature_c_max": round(temp_c_max, 1) if temp_c_max is not None else None,
+        "temperature_c_min": round(temp_c_min, 1) if temp_c_min is not None else None,
+        "temperature_f_max": round((temp_c_max * 9 / 5) + 32, 1) if temp_c_max is not None else None,
+        "temperature_f_min": round((temp_c_min * 9 / 5) + 32, 1) if temp_c_min is not None else None,
+    }
 
 
 mcp = FastMCP("retirement-assistant")
@@ -247,8 +357,21 @@ def get_daily_briefing(
         (target_date,),
     ).fetchall()
 
-    suggestion_count = int(_load_settings().get("activity_suggestions_per_day", 3))
-    recommendation_clauses = _activity_recommendation_clauses(rain_chance=rain_chance, readiness=readiness)
+    settings = _load_settings()
+    weather = _fetch_weather_for_date(target_date)
+    effective_rain_chance = rain_chance if rain_chance is not None else (weather or {}).get("rain_chance")
+    temp_f_high = (weather or {}).get("temperature_f_max")
+
+    suggestion_count = int(settings.get("activity_suggestions_per_day", 3))
+    lookback_days = int(settings.get("briefing_lookback_days", 7))
+    if lookback_days < 1:
+        lookback_days = 1
+    lookback_window_days = lookback_days - 1
+    recommendation_clauses = _activity_recommendation_clauses(
+        rain_chance=effective_rain_chance,
+        readiness=readiness,
+        temp_f_high=temp_f_high,
+    )
     recommendation_sql = ""
     if recommendation_clauses:
         recommendation_sql = "\n        AND " + "\n        AND ".join(recommendation_clauses)
@@ -260,13 +383,14 @@ def get_daily_briefing(
         WHERE a.id NOT IN (
             SELECT activity_id
             FROM activity_log
-            WHERE status = 'done' AND log_date = date(?, '-1 day')
+            WHERE status = 'done'
+              AND date(log_date) BETWEEN date(?, ? || ' day') AND date(?)
         )
         {recommendation_sql}
         ORDER BY random()
         LIMIT ?
         """,
-        (target_date, suggestion_count),
+        (target_date, f"-{lookback_window_days}", target_date, suggestion_count),
     ).fetchall()
 
     activity_suggestions = _hydrate_activities(conn, activities)
@@ -274,8 +398,9 @@ def get_daily_briefing(
 
     return {
         "date": target_date,
-        "rain_chance": rain_chance,
+        "rain_chance": effective_rain_chance,
         "readiness": readiness,
+        "weather": weather,
         "appointments": [dict(row) for row in appointments],
         "active_timed_events": [dict(row) for row in timed_events],
         "activity_suggestions": activity_suggestions,

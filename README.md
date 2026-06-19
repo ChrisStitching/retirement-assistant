@@ -1,9 +1,17 @@
 # retirement-assistant
 
-Retirement assistant scaffold with:
-- SQLite data model
-- Python CLI scripts for data entry
-- MCP server stub for Copilot Agent tools
+Retirement assistant is a personal planning tool for day-to-day retirement activities.
+
+It combines:
+- A SQLite database for activities, appointments, timed events, and activity history
+- A Python MCP server with natural-language tools for Copilot
+- Lightweight CLI scripts for setup and optional direct data entry
+
+The assistant can:
+- Build a daily briefing with appointments, active events, and activity suggestions
+- Log completed activities and avoid repeating recently completed ones
+- Apply recommendation filters based on readiness, weather sensitivity, rain chance, and temperature
+- Manage activity metadata (category, intensity, links, notes)
 
 ## Structure
 
@@ -26,13 +34,19 @@ retirement-assistant/
 
 ## Local Settings
 
-This scaffold uses:
+Use `settings.local.json` for personalized local paths and environment-specific values.
 
-`C:/Users/curio/OneDrive/Assistant`
+Suggested storage locations:
+- `~/OneDrive/Assistant`
+- `~/Documents/Assistant`
+- Any local folder you control and back up regularly
 
-for personal data storage. Your local DB file is configured as:
+Typical local overrides include:
+- `data_root`: your personal storage folder
+- `db_path`: your local SQLite file path
+- `weather`: location and timezone values for daily briefing weather lookup
 
-`C:/Users/curio/OneDrive/Assistant/retirement.db`
+Keep `settings.local.json` out of source control (it is already git-ignored).
 
 ## Quick Start
 
@@ -94,3 +108,30 @@ Available MCP tools now include:
 - `add_activity`
 - `update_activity`
 - `get_activity_details`
+
+## Automatic Weather In Daily Briefing
+
+`get_daily_briefing` can now auto-fill rain chance and daily temperature range using the free Open-Meteo API.
+
+Configuration in `settings.local.json`:
+
+```json
+"weather": {
+	"enabled": true,
+	"latitude": 47.4502,
+	"longitude": -122.3088,
+	"timezone": "America/Los_Angeles"
+}
+```
+
+Behavior:
+
+- If `rain_chance` is passed explicitly, that value is used for filtering suggestions.
+- If `rain_chance` is omitted, the server uses weather lookup rain chance when available.
+- Response now includes a `weather` object with `rain_chance`, `temperature_c_max`, `temperature_c_min`, `temperature_f_max`, `temperature_f_min`, and `source`.
+- Activities marked done within the last `briefing_lookback_days` (default 7) are excluded from recommendations.
+- Temperature-aware filtering is applied automatically when weather is available:
+	- Motorcycle category activities are excluded when daily high is below 55F.
+	- Physical intensity 3 activities are excluded when daily high is above 75F.
+	- Weather-sensitive physical intensity 2 activities are excluded when daily high is above 85F.
+- If weather lookup is disabled or unavailable, briefing still works with `weather: null`.

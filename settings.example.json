@@ -2,5 +2,11 @@
   "data_root": "C:/Users/YOU/OneDrive/Assistant",
   "db_path": "C:/Users/YOU/OneDrive/Assistant/retirement.db",
   "briefing_lookback_days": 7,
-  "activity_suggestions_per_day": 3
+  "activity_suggestions_per_day": 3,
+  "weather": {
+    "enabled": false,
+    "latitude": 47.673,
+    "longitude": -122.121,
+    "timezone": "America/Los_Angeles"
+  }
 }
