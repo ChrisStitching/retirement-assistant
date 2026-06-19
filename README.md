@@ -135,3 +135,11 @@ Behavior:
 	- Physical intensity 3 activities are excluded when daily high is above 75F.
 	- Weather-sensitive physical intensity 2 activities are excluded when daily high is above 85F.
 - If weather lookup is disabled or unavailable, briefing still works with `weather: null`.
+
+---
+
+A Curious Creations project by Christine Johnson  
+Copyright © 2026 Christine Johnson
+
+If this project sparks ideas or you'd like to connect,  
+you're welcome to reach out on [LinkedIn](https://www.linkedin.com/in/chrisjohnsonwa).
