@@ -3,12 +3,13 @@
 Retirement assistant is a personal planning tool for day-to-day retirement activities.
 
 It combines:
-- A SQLite database for activities, appointments, timed events, and activity history
+- A SQLite database for activities, appointments, timed events, annual recurring events, and activity history
 - A Python MCP server with natural-language tools for Copilot
 - Lightweight CLI scripts for setup and optional direct data entry
 
 The assistant can:
 - Build a daily briefing with appointments, active events, and activity suggestions
+- Include annual recurring reminders on the day-of and in advance
 - Log completed activities and avoid repeating recently completed ones
 - Apply recommendation filters based on readiness, weather sensitivity, rain chance, and temperature
 - Manage activity metadata (category, intensity, links, notes)
@@ -24,6 +25,8 @@ retirement-assistant/
 │   ├── setup_db.py
 │   ├── add_appointment.py
 │   ├── add_event.py
+│   ├── add_annual_event.py
+│   ├── update_annual_event.py
 │   ├── add_activity.py
 │   └── update_activity.py
 ├── settings.example.json
@@ -72,6 +75,8 @@ Keep `settings.local.json` out of source control (it is already git-ignored).
 	```powershell
 	python scripts/add_appointment.py --title "Dentist" --appt-dt "2026-06-17T09:00" --location "Main St Clinic"
 	python scripts/add_event.py --title "Summer Festival" --start-date "2026-06-23" --end-date "2026-06-28"
+	python scripts/add_annual_event.py --title "Microsoft hire anniversary" --event-date "2008-04-07" --description "Celebrate work anniversary" --reminder-days-before 7
+	python scripts/update_annual_event.py 1 --status "inactive"
 	python scripts/add_activity.py --title "Morning Walk" --category "outdoor" --weather-sensitive 1 --physical-intensity 1 --url "https://example.com/trail"
 	python scripts/update_activity.py 1 --location "Watershed Trailhead" --url "https://example.com/parking" --url "https://example.com/map"
 	```
@@ -96,6 +101,8 @@ After the MCP server is running, you can type prompts like:
 
 - Add appointment title "Dentist" at "2026-06-17T09:00" location "Main St Clinic" notes "Bring insurance card"
 - Add timed event title "Summer Festival" start "2026-06-23" end "2026-06-28" description "Community event"
+- Add annual event title "Microsoft hire anniversary" event_date "2008-04-07" description "Celebrate" reminder_days_before 7
+- Update annual event id 1 status "inactive"
 - Add activity title "Morning Walk" category "outdoor" weather_sensitive 1 physical_intensity 1 urls ["https://example.com/trail"]
 - Update activity id 1 location "Watershed Trailhead" urls ["https://example.com/parking", "https://example.com/map"]
 - Give me details for activity 1
@@ -110,6 +117,8 @@ Available MCP tools now include:
 - `log_activity`
 - `add_appointment`
 - `add_timed_event`
+- `add_annual_event`
+- `update_annual_event`
 - `add_activity`
 - `update_activity`
 - `get_activity_details`
@@ -134,6 +143,7 @@ Behavior:
 - If `rain_chance` is passed explicitly, that value is used for filtering suggestions.
 - If `rain_chance` is omitted, the server uses weather lookup rain chance when available.
 - Response now includes a `weather` object with `rain_chance`, `temperature_c_max`, `temperature_c_min`, `temperature_f_max`, `temperature_f_min`, and `source`.
+- Response now includes an `annual_reminders` array with recurring anniversary notifications.
 - Activities marked done within the last `briefing_lookback_days` (default 7) are excluded from recommendations.
 - Temperature-aware filtering is applied automatically when weather is available:
 	- Motorcycle category activities are excluded when daily high is below 55F.

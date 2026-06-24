@@ -4,6 +4,7 @@ import json
 import logging
 import ssl
 import sqlite3
+import calendar
 from datetime import date as date_type
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,79 @@ def _as_date(input_date: str | None) -> str:
     if input_date:
         return input_date
     return date_type.today().isoformat()
+
+
+def _parse_iso_date(value: str) -> date_type:
+    return date_type.fromisoformat(value)
+
+
+def _anniversary_date_for_year(anchor_date: date_type, target_year: int) -> date_type:
+    month = anchor_date.month
+    day = anchor_date.day
+    max_day = calendar.monthrange(target_year, month)[1]
+    if day > max_day:
+        day = max_day
+    return date_type(target_year, month, day)
+
+
+def _annual_reminders_for_date(conn: sqlite3.Connection, target_date: str) -> list[dict[str, Any]]:
+    target = _parse_iso_date(target_date)
+
+    rows = conn.execute(
+        """
+        SELECT id, title, event_date, description, reminder_days_before, status
+        FROM annual_events
+        WHERE status = 'active'
+        ORDER BY title COLLATE NOCASE ASC
+        """
+    ).fetchall()
+
+    reminders: list[dict[str, Any]] = []
+    for row in rows:
+        anchor = _parse_iso_date(row["event_date"])
+        reminder_days_before = int(row["reminder_days_before"] or 0)
+        anniversary_this_year = _anniversary_date_for_year(anchor, target.year)
+
+        if target == anniversary_this_year:
+            years = anniversary_this_year.year - anchor.year
+            reminders.append(
+                {
+                    "id": row["id"],
+                    "title": row["title"],
+                    "description": row["description"],
+                    "event_date": row["event_date"],
+                    "anniversary_date": anniversary_this_year.isoformat(),
+                    "days_until": 0,
+                    "years": years,
+                    "kind": "anniversary_today",
+                    "message": f"Today is {row['title']} ({years} years).",
+                }
+            )
+            continue
+
+        next_anniversary = anniversary_this_year
+        if target > anniversary_this_year:
+            next_anniversary = _anniversary_date_for_year(anchor, target.year + 1)
+
+        days_until = (next_anniversary - target).days
+        if days_until == reminder_days_before:
+            years = next_anniversary.year - anchor.year
+            reminders.append(
+                {
+                    "id": row["id"],
+                    "title": row["title"],
+                    "description": row["description"],
+                    "event_date": row["event_date"],
+                    "anniversary_date": next_anniversary.isoformat(),
+                    "days_until": days_until,
+                    "years": years,
+                    "kind": "anniversary_upcoming",
+                    "message": f"{row['title']} is in {days_until} days ({years} years on {next_anniversary.isoformat()}).",
+                }
+            )
+
+    reminders.sort(key=lambda reminder: (reminder["days_until"], reminder["title"].lower()))
+    return reminders
 
 
 def _connect() -> sqlite3.Connection:
@@ -357,6 +431,8 @@ def get_daily_briefing(
         (target_date,),
     ).fetchall()
 
+    annual_reminders = _annual_reminders_for_date(conn, target_date)
+
     settings = _load_settings()
     weather = _fetch_weather_for_date(target_date)
     effective_rain_chance = rain_chance if rain_chance is not None else (weather or {}).get("rain_chance")
@@ -403,6 +479,7 @@ def get_daily_briefing(
         "weather": weather,
         "appointments": [dict(row) for row in appointments],
         "active_timed_events": [dict(row) for row in timed_events],
+        "annual_reminders": annual_reminders,
         "activity_suggestions": activity_suggestions,
     }
 
@@ -467,6 +544,117 @@ def add_timed_event(
     conn.close()
 
     return {"ok": True, "id": cursor.lastrowid}
+
+
+@mcp.tool()
+def add_annual_event(
+    title: str,
+    event_date: str,
+    description: str = "",
+    reminder_days_before: int = 7,
+) -> dict[str, Any]:
+    """Add an annual recurring event with date YYYY-MM-DD and optional reminder lead time."""
+
+    if reminder_days_before < 0:
+        return {"ok": False, "error": "reminder_days_before cannot be negative"}
+
+    try:
+        _parse_iso_date(event_date)
+    except ValueError:
+        return {"ok": False, "error": "event_date must be YYYY-MM-DD"}
+
+    conn = _connect()
+    cursor = conn.execute(
+        """
+        INSERT INTO annual_events (title, event_date, description, reminder_days_before)
+        VALUES (?, ?, ?, ?)
+        """,
+        (title, event_date, description or None, reminder_days_before),
+    )
+    conn.commit()
+    conn.close()
+
+    return {"ok": True, "id": cursor.lastrowid}
+
+
+@mcp.tool()
+def update_annual_event(
+    annual_event_id: int,
+    title: str | None = None,
+    event_date: str | None = None,
+    description: str | None = None,
+    reminder_days_before: int | None = None,
+    status: str | None = None,
+) -> dict[str, Any]:
+    """Update an annual event. Empty description clears text; status can be active or inactive."""
+
+    conn = _connect()
+    existing = conn.execute(
+        """
+        SELECT id, title, event_date, description, reminder_days_before, status
+        FROM annual_events
+        WHERE id = ?
+        """,
+        (annual_event_id,),
+    ).fetchone()
+    if existing is None:
+        conn.close()
+        return {"ok": False, "error": f"Annual event {annual_event_id} not found"}
+
+    updates: dict[str, Any] = {}
+    if title is not None:
+        trimmed_title = title.strip()
+        if not trimmed_title:
+            conn.close()
+            return {"ok": False, "error": "title cannot be empty"}
+        updates["title"] = trimmed_title
+
+    if event_date is not None:
+        try:
+            _parse_iso_date(event_date)
+        except ValueError:
+            conn.close()
+            return {"ok": False, "error": "event_date must be YYYY-MM-DD"}
+        updates["event_date"] = event_date
+
+    if description is not None:
+        updates["description"] = description.strip() or None
+
+    if reminder_days_before is not None:
+        if reminder_days_before < 0:
+            conn.close()
+            return {"ok": False, "error": "reminder_days_before cannot be negative"}
+        updates["reminder_days_before"] = reminder_days_before
+
+    if status is not None:
+        normalized_status = status.strip().lower()
+        if normalized_status not in {"active", "inactive"}:
+            conn.close()
+            return {"ok": False, "error": "status must be active or inactive"}
+        updates["status"] = normalized_status
+
+    if not updates:
+        conn.close()
+        return {"ok": False, "error": "No fields provided to update"}
+
+    assignments = ", ".join(f"{column} = ?" for column in updates)
+    conn.execute(
+        f"UPDATE annual_events SET {assignments} WHERE id = ?",
+        (*updates.values(), annual_event_id),
+    )
+    conn.commit()
+
+    updated = conn.execute(
+        """
+        SELECT id, title, event_date, description, reminder_days_before, status
+        FROM annual_events
+        WHERE id = ?
+        """,
+        (annual_event_id,),
+    ).fetchone()
+    conn.close()
+
+    return {"ok": True, "annual_event": dict(updated)}
 
 
 @mcp.tool()

@@ -20,6 +20,16 @@ CREATE TABLE IF NOT EXISTS timed_events (
     created_at  TEXT DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS annual_events (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    title                   TEXT NOT NULL,
+    event_date              TEXT NOT NULL,
+    description             TEXT,
+    reminder_days_before    INTEGER DEFAULT 7,
+    status                  TEXT DEFAULT 'active',
+    created_at              TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS activities (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     title               TEXT NOT NULL,

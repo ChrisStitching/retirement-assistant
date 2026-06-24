@@ -9,6 +9,7 @@ Design priorities:
 - Support natural-language operation through MCP tools.
 - Keep behavior deterministic and inspectable through simple SQL-backed logic.
 - Make recommendations context-aware (recent history, readiness, rain chance, and temperature).
+- Support recurring life milestones with annual reminder logic.
 
 ## Current System Shape
 
@@ -45,6 +46,7 @@ Core runtime path:
 Current tables:
 - `appointments`: point-in-time items (`appt_dt`) and optional notes.
 - `timed_events`: date-range items with status lifecycle.
+- `annual_events`: recurring annual reminders using an anchor date and advance notice window.
 - `activities`: recommendation candidates with category, weather sensitivity, and physical intensity.
 - `activity_urls`: one-to-many links for activities.
 - `activity_log`: history of suggested/completed/skipped outcomes.
@@ -61,6 +63,8 @@ The MCP server currently exposes these capabilities:
 - `log_activity`
 - `add_appointment`
 - `add_timed_event`
+- `add_annual_event`
+- `update_annual_event`
 - `add_activity`
 - `update_activity`
 - `get_activity_details`
@@ -72,6 +76,7 @@ These are optimized for conversational use while still returning explicit JSON f
 `get_daily_briefing` composes:
 - Appointments for target date and next day.
 - Active timed events spanning target date.
+- Annual reminders for recurring events (day-of and exact lead-time reminders).
 - Randomized activity suggestions after rule-based filtering.
 
 Activity filtering rules currently implemented:
