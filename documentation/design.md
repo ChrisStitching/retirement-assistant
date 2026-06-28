@@ -10,6 +10,7 @@ Design priorities:
 - Keep behavior deterministic and inspectable through simple SQL-backed logic.
 - Make recommendations context-aware (recent history, readiness, rain chance, and temperature).
 - Support recurring life milestones with annual reminder logic.
+- Prefer MCP tools as the default user-facing workflow, with CLI scripts as secondary fallbacks.
 
 ## Current System Shape
 
@@ -29,6 +30,10 @@ Core runtime path:
 3. `mcp/server.py` executes SQL against SQLite and returns structured JSON.
 4. For daily briefings, server may enrich results with weather from Open-Meteo.
 
+Schema compatibility note:
+- `mcp/server.py` applies lightweight runtime migrations for backward compatibility (for example, adding `appointments.appt_end_dt` when missing).
+- `scripts/setup_db.py` also applies the same compatibility migration path for direct setup/maintenance workflows.
+
 ## Repository Components
 
 - `mcp/server.py`: MCP tool implementations and recommendation logic.
@@ -44,7 +49,7 @@ Core runtime path:
 ## Data Model
 
 Current tables:
-- `appointments`: point-in-time items (`appt_dt`) and optional notes.
+- `appointments`: start datetime (`appt_dt`), optional end datetime (`appt_end_dt`), and optional notes.
 - `timed_events`: date-range items with status lifecycle.
 - `annual_events`: recurring annual reminders using an anchor date and advance notice window.
 - `activities`: recommendation candidates with category, weather sensitivity, and physical intensity.
@@ -62,9 +67,17 @@ The MCP server currently exposes these capabilities:
 - `get_daily_briefing`
 - `log_activity`
 - `add_appointment`
+- `list_appointments`
+- `update_appointment`
+- `delete_appointment`
 - `add_timed_event`
+- `list_timed_events`
+- `update_timed_event`
+- `delete_timed_event`
 - `add_annual_event`
+- `list_annual_events`
 - `update_annual_event`
+- `delete_annual_event`
 - `add_activity`
 - `update_activity`
 - `get_activity_details`
@@ -99,7 +112,7 @@ Weather integration details:
 ## Configuration Strategy
 
 Shared config:
-- `settings.example.json` contains safe defaults/template keys.
+- `settings.example.json` contains safe defaults/template keys, including SeaTac weather coordinates (`47.4502`, `-122.3088`) as a concrete example.
 
 Local config:
 - `settings.local.json` overrides local paths and weather coordinates.

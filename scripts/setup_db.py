@@ -20,6 +20,11 @@ def resolve_settings_path(settings_arg: str | None) -> Path:
     return Path("settings.example.json")
 
 
+def _column_names(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return {row[1] for row in rows}
+
+
 def migrate_schema(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys = ON")
 
@@ -34,6 +39,10 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+
+    appointment_columns = _column_names(conn, "appointments")
+    if "appt_end_dt" not in appointment_columns:
+        conn.execute("ALTER TABLE appointments ADD COLUMN appt_end_dt TEXT")
 
 
 def main() -> None:

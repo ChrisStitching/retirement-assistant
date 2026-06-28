@@ -6,6 +6,7 @@ import ssl
 import sqlite3
 import calendar
 from datetime import date as date_type
+from datetime import datetime as datetime_type
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -58,6 +59,44 @@ def _as_date(input_date: str | None) -> str:
 
 def _parse_iso_date(value: str) -> date_type:
     return date_type.fromisoformat(value)
+
+
+def _parse_iso_datetime(value: str) -> datetime_type:
+    return datetime_type.fromisoformat(value)
+
+
+def _validate_appointment_datetimes(appt_dt: str, appt_end_dt: str | None = None) -> str | None:
+    try:
+        start = _parse_iso_datetime(appt_dt)
+    except ValueError:
+        return "appt_dt must be ISO 8601 like 2026-06-17T09:00"
+
+    if appt_end_dt:
+        try:
+            end = _parse_iso_datetime(appt_end_dt)
+        except ValueError:
+            return "appt_end_dt must be ISO 8601 like 2026-06-17T10:00"
+        if end < start:
+            return "appt_end_dt must be on or after appt_dt"
+
+    return None
+
+
+def _validate_date_range(start_date: str, end_date: str, start_label: str = "start_date", end_label: str = "end_date") -> str | None:
+    try:
+        start = _parse_iso_date(start_date)
+    except ValueError:
+        return f"{start_label} must be YYYY-MM-DD"
+
+    try:
+        end = _parse_iso_date(end_date)
+    except ValueError:
+        return f"{end_label} must be YYYY-MM-DD"
+
+    if end < start:
+        return f"{end_label} must be on or after {start_label}"
+
+    return None
 
 
 def _anniversary_date_for_year(anchor_date: date_type, target_year: int) -> date_type:
@@ -133,7 +172,20 @@ def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(_db_path())
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    _migrate_schema(conn)
     return conn
+
+
+def _column_names(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+    return {row[1] for row in rows}
+
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    appointment_columns = _column_names(conn, "appointments")
+    if "appt_end_dt" not in appointment_columns:
+        conn.execute("ALTER TABLE appointments ADD COLUMN appt_end_dt TEXT")
+        conn.commit()
 
 
 def _normalize_urls(urls: list[str] | None) -> list[str]:
@@ -193,6 +245,51 @@ def _get_activity(conn: sqlite3.Connection, activity_id: int) -> dict[str, Any] 
         return None
 
     return _hydrate_activities(conn, [row])[0]
+
+
+def _get_appointment(conn: sqlite3.Connection, appointment_id: int) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT id, title, location, appt_dt, appt_end_dt, notes
+        FROM appointments
+        WHERE id = ?
+        """,
+        (appointment_id,),
+    ).fetchone()
+    if row is None:
+        return None
+
+    return dict(row)
+
+
+def _get_timed_event(conn: sqlite3.Connection, timed_event_id: int) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT id, title, description, url, start_date, end_date, status
+        FROM timed_events
+        WHERE id = ?
+        """,
+        (timed_event_id,),
+    ).fetchone()
+    if row is None:
+        return None
+
+    return dict(row)
+
+
+def _get_annual_event(conn: sqlite3.Connection, annual_event_id: int) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT id, title, event_date, description, reminder_days_before, status
+        FROM annual_events
+        WHERE id = ?
+        """,
+        (annual_event_id,),
+    ).fetchone()
+    if row is None:
+        return None
+
+    return dict(row)
 
 
 def _find_activity_row(
@@ -412,7 +509,7 @@ def get_daily_briefing(
 
     appointments = conn.execute(
         """
-        SELECT id, title, location, appt_dt, notes
+        SELECT id, title, location, appt_dt, appt_end_dt, notes
         FROM appointments
         WHERE date(appt_dt) IN (date(?), date(?, '+1 day'))
         ORDER BY appt_dt ASC
@@ -505,21 +602,170 @@ def log_activity(activity_id: int, status: str, log_date: str | None = None, not
 
 
 @mcp.tool()
-def add_appointment(title: str, appt_dt: str, location: str = "", notes: str = "") -> dict[str, Any]:
-    """Add an appointment with ISO datetime like 2026-06-17T09:00."""
+def add_appointment(
+    title: str,
+    appt_dt: str,
+    appt_end_dt: str = "",
+    location: str = "",
+    notes: str = "",
+) -> dict[str, Any]:
+    """Add an appointment with ISO datetimes like 2026-06-17T09:00."""
+
+    trimmed_title = title.strip()
+    if not trimmed_title:
+        return {"ok": False, "error": "title cannot be empty"}
+
+    normalized_end = appt_end_dt.strip() or None
+    datetime_error = _validate_appointment_datetimes(appt_dt, normalized_end)
+    if datetime_error:
+        return {"ok": False, "error": datetime_error}
 
     conn = _connect()
     cursor = conn.execute(
         """
-        INSERT INTO appointments (title, location, appt_dt, notes)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO appointments (title, location, appt_dt, appt_end_dt, notes)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (title, location or None, appt_dt, notes or None),
+        (trimmed_title, location.strip() or None, appt_dt, normalized_end, notes.strip() or None),
     )
+    appointment_id = cursor.lastrowid
+    if appointment_id is None:
+        conn.close()
+        return {"ok": False, "error": "Failed to create appointment"}
+
+    conn.commit()
+    appointment = _get_appointment(conn, appointment_id)
+    conn.close()
+
+    return {"ok": True, "id": appointment_id, "appointment": appointment}
+
+
+@mcp.tool()
+def list_appointments(start_date: str | None = None, end_date: str | None = None) -> dict[str, Any]:
+    """List appointments on or after start_date, optionally through end_date, ordered by time."""
+
+    start = _as_date(start_date)
+    try:
+        _parse_iso_date(start)
+    except ValueError:
+        return {"ok": False, "error": "start_date must be YYYY-MM-DD"}
+
+    if end_date is not None:
+        try:
+            _parse_iso_date(end_date)
+        except ValueError:
+            return {"ok": False, "error": "end_date must be YYYY-MM-DD"}
+        if end_date < start:
+            return {"ok": False, "error": "end_date must be on or after start_date"}
+
+    conn = _connect()
+    if end_date is None:
+        rows = conn.execute(
+            """
+            SELECT id, title, location, appt_dt, appt_end_dt, notes
+            FROM appointments
+            WHERE date(appt_dt) = date(?)
+            ORDER BY appt_dt ASC
+            """,
+            (start,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT id, title, location, appt_dt, appt_end_dt, notes
+            FROM appointments
+            WHERE date(appt_dt) BETWEEN date(?) AND date(?)
+            ORDER BY appt_dt ASC
+            """,
+            (start, end_date),
+        ).fetchall()
+    conn.close()
+
+    return {
+        "ok": True,
+        "start_date": start,
+        "end_date": end_date or start,
+        "appointments": [dict(row) for row in rows],
+    }
+
+
+@mcp.tool()
+def update_appointment(
+    appointment_id: int,
+    title: str | None = None,
+    appt_dt: str | None = None,
+    appt_end_dt: str | None = None,
+    location: str | None = None,
+    notes: str | None = None,
+) -> dict[str, Any]:
+    """Update an appointment. Empty end time, location, or notes clear those fields."""
+
+    conn = _connect()
+    existing = _get_appointment(conn, appointment_id)
+    if existing is None:
+        conn.close()
+        return {"ok": False, "error": f"Appointment {appointment_id} not found"}
+
+    updates: dict[str, Any] = {}
+    if title is not None:
+        trimmed_title = title.strip()
+        if not trimmed_title:
+            conn.close()
+            return {"ok": False, "error": "title cannot be empty"}
+        updates["title"] = trimmed_title
+
+    effective_appt_dt = appt_dt if appt_dt is not None else str(existing["appt_dt"])
+    effective_appt_end_dt = existing["appt_end_dt"]
+
+    if appt_dt is not None:
+        updates["appt_dt"] = appt_dt
+
+    if appt_end_dt is not None:
+        effective_appt_end_dt = appt_end_dt.strip() or None
+        updates["appt_end_dt"] = effective_appt_end_dt
+
+    datetime_error = _validate_appointment_datetimes(effective_appt_dt, effective_appt_end_dt)
+    if datetime_error:
+        conn.close()
+        return {"ok": False, "error": datetime_error}
+
+    if location is not None:
+        updates["location"] = location.strip() or None
+
+    if notes is not None:
+        updates["notes"] = notes.strip() or None
+
+    if not updates:
+        conn.close()
+        return {"ok": False, "error": "No fields provided to update"}
+
+    assignments = ", ".join(f"{column} = ?" for column in updates)
+    conn.execute(
+        f"UPDATE appointments SET {assignments} WHERE id = ?",
+        (*updates.values(), appointment_id),
+    )
+    conn.commit()
+    appointment = _get_appointment(conn, appointment_id)
+    conn.close()
+
+    return {"ok": True, "appointment": appointment}
+
+
+@mcp.tool()
+def delete_appointment(appointment_id: int) -> dict[str, Any]:
+    """Delete an appointment by id."""
+
+    conn = _connect()
+    existing = _get_appointment(conn, appointment_id)
+    if existing is None:
+        conn.close()
+        return {"ok": False, "error": f"Appointment {appointment_id} not found"}
+
+    conn.execute("DELETE FROM appointments WHERE id = ?", (appointment_id,))
     conn.commit()
     conn.close()
 
-    return {"ok": True, "id": cursor.lastrowid}
+    return {"ok": True, "deleted_appointment": existing}
 
 
 @mcp.tool()
@@ -532,18 +778,172 @@ def add_timed_event(
 ) -> dict[str, Any]:
     """Add a timed event with date range in YYYY-MM-DD format."""
 
+    trimmed_title = title.strip()
+    if not trimmed_title:
+        return {"ok": False, "error": "title cannot be empty"}
+
+    date_error = _validate_date_range(start_date, end_date)
+    if date_error:
+        return {"ok": False, "error": date_error}
+
     conn = _connect()
     cursor = conn.execute(
         """
         INSERT INTO timed_events (title, description, url, start_date, end_date)
         VALUES (?, ?, ?, ?, ?)
         """,
-        (title, description or None, url or None, start_date, end_date),
+        (trimmed_title, description.strip() or None, url.strip() or None, start_date, end_date),
     )
+    timed_event_id = cursor.lastrowid
+    if timed_event_id is None:
+        conn.close()
+        return {"ok": False, "error": "Failed to create timed event"}
+
+    conn.commit()
+    timed_event = _get_timed_event(conn, timed_event_id)
+    conn.close()
+
+    return {"ok": True, "id": timed_event_id, "timed_event": timed_event}
+
+
+@mcp.tool()
+def list_timed_events(
+    start_date: str | None = None,
+    end_date: str | None = None,
+    status: str | None = None,
+) -> dict[str, Any]:
+    """List timed events, optionally filtered to events overlapping a date window and/or by status."""
+
+    window_start = start_date
+    window_end = end_date
+    if window_start is None and window_end is not None:
+        window_start = window_end
+    if window_end is None and window_start is not None:
+        window_end = window_start
+
+    if window_start is not None and window_end is not None:
+        date_error = _validate_date_range(window_start, window_end)
+        if date_error:
+            return {"ok": False, "error": date_error}
+
+    normalized_status = None
+    if status is not None:
+        normalized_status = status.strip().lower()
+        if normalized_status not in {"active", "inactive"}:
+            return {"ok": False, "error": "status must be active or inactive"}
+
+    conn = _connect()
+    sql = """
+        SELECT id, title, description, url, start_date, end_date, status
+        FROM timed_events
+        WHERE 1 = 1
+    """
+    params: list[Any] = []
+
+    if window_start is not None and window_end is not None:
+        sql += """
+          AND date(end_date) >= date(?)
+          AND date(start_date) <= date(?)
+        """
+        params.extend([window_start, window_end])
+
+    if normalized_status is not None:
+        sql += "\n          AND status = ?"
+        params.append(normalized_status)
+
+    sql += "\n        ORDER BY start_date ASC, end_date ASC, title COLLATE NOCASE ASC"
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+
+    return {
+        "ok": True,
+        "start_date": window_start,
+        "end_date": window_end,
+        "status": normalized_status,
+        "timed_events": [dict(row) for row in rows],
+    }
+
+
+@mcp.tool()
+def update_timed_event(
+    timed_event_id: int,
+    title: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    description: str | None = None,
+    url: str | None = None,
+    status: str | None = None,
+) -> dict[str, Any]:
+    """Update a timed event. Empty description or url clears those fields."""
+
+    conn = _connect()
+    existing = _get_timed_event(conn, timed_event_id)
+    if existing is None:
+        conn.close()
+        return {"ok": False, "error": f"Timed event {timed_event_id} not found"}
+
+    updates: dict[str, Any] = {}
+    if title is not None:
+        trimmed_title = title.strip()
+        if not trimmed_title:
+            conn.close()
+            return {"ok": False, "error": "title cannot be empty"}
+        updates["title"] = trimmed_title
+
+    effective_start_date = start_date if start_date is not None else str(existing["start_date"])
+    effective_end_date = end_date if end_date is not None else str(existing["end_date"])
+    date_error = _validate_date_range(effective_start_date, effective_end_date)
+    if date_error:
+        conn.close()
+        return {"ok": False, "error": date_error}
+
+    if start_date is not None:
+        updates["start_date"] = start_date
+    if end_date is not None:
+        updates["end_date"] = end_date
+    if description is not None:
+        updates["description"] = description.strip() or None
+    if url is not None:
+        updates["url"] = url.strip() or None
+
+    if status is not None:
+        normalized_status = status.strip().lower()
+        if normalized_status not in {"active", "inactive"}:
+            conn.close()
+            return {"ok": False, "error": "status must be active or inactive"}
+        updates["status"] = normalized_status
+
+    if not updates:
+        conn.close()
+        return {"ok": False, "error": "No fields provided to update"}
+
+    assignments = ", ".join(f"{column} = ?" for column in updates)
+    conn.execute(
+        f"UPDATE timed_events SET {assignments} WHERE id = ?",
+        (*updates.values(), timed_event_id),
+    )
+    conn.commit()
+    timed_event = _get_timed_event(conn, timed_event_id)
+    conn.close()
+
+    return {"ok": True, "timed_event": timed_event}
+
+
+@mcp.tool()
+def delete_timed_event(timed_event_id: int) -> dict[str, Any]:
+    """Delete a timed event by id."""
+
+    conn = _connect()
+    existing = _get_timed_event(conn, timed_event_id)
+    if existing is None:
+        conn.close()
+        return {"ok": False, "error": f"Timed event {timed_event_id} not found"}
+
+    conn.execute("DELETE FROM timed_events WHERE id = ?", (timed_event_id,))
     conn.commit()
     conn.close()
 
-    return {"ok": True, "id": cursor.lastrowid}
+    return {"ok": True, "deleted_timed_event": existing}
 
 
 @mcp.tool()
@@ -554,6 +954,10 @@ def add_annual_event(
     reminder_days_before: int = 7,
 ) -> dict[str, Any]:
     """Add an annual recurring event with date YYYY-MM-DD and optional reminder lead time."""
+
+    trimmed_title = title.strip()
+    if not trimmed_title:
+        return {"ok": False, "error": "title cannot be empty"}
 
     if reminder_days_before < 0:
         return {"ok": False, "error": "reminder_days_before cannot be negative"}
@@ -569,12 +973,52 @@ def add_annual_event(
         INSERT INTO annual_events (title, event_date, description, reminder_days_before)
         VALUES (?, ?, ?, ?)
         """,
-        (title, event_date, description or None, reminder_days_before),
+        (trimmed_title, event_date, description.strip() or None, reminder_days_before),
     )
+    annual_event_id = cursor.lastrowid
+    if annual_event_id is None:
+        conn.close()
+        return {"ok": False, "error": "Failed to create annual event"}
+
     conn.commit()
+    annual_event = _get_annual_event(conn, annual_event_id)
     conn.close()
 
-    return {"ok": True, "id": cursor.lastrowid}
+    return {"ok": True, "id": annual_event_id, "annual_event": annual_event}
+
+
+@mcp.tool()
+def list_annual_events(status: str | None = None) -> dict[str, Any]:
+    """List annual events, optionally filtered by active or inactive status."""
+
+    normalized_status = None
+    if status is not None:
+        normalized_status = status.strip().lower()
+        if normalized_status not in {"active", "inactive"}:
+            return {"ok": False, "error": "status must be active or inactive"}
+
+    conn = _connect()
+    if normalized_status is None:
+        rows = conn.execute(
+            """
+            SELECT id, title, event_date, description, reminder_days_before, status
+            FROM annual_events
+            ORDER BY event_date ASC, title COLLATE NOCASE ASC
+            """
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT id, title, event_date, description, reminder_days_before, status
+            FROM annual_events
+            WHERE status = ?
+            ORDER BY event_date ASC, title COLLATE NOCASE ASC
+            """,
+            (normalized_status,),
+        ).fetchall()
+    conn.close()
+
+    return {"ok": True, "status": normalized_status, "annual_events": [dict(row) for row in rows]}
 
 
 @mcp.tool()
@@ -589,14 +1033,7 @@ def update_annual_event(
     """Update an annual event. Empty description clears text; status can be active or inactive."""
 
     conn = _connect()
-    existing = conn.execute(
-        """
-        SELECT id, title, event_date, description, reminder_days_before, status
-        FROM annual_events
-        WHERE id = ?
-        """,
-        (annual_event_id,),
-    ).fetchone()
+    existing = _get_annual_event(conn, annual_event_id)
     if existing is None:
         conn.close()
         return {"ok": False, "error": f"Annual event {annual_event_id} not found"}
@@ -644,17 +1081,27 @@ def update_annual_event(
     )
     conn.commit()
 
-    updated = conn.execute(
-        """
-        SELECT id, title, event_date, description, reminder_days_before, status
-        FROM annual_events
-        WHERE id = ?
-        """,
-        (annual_event_id,),
-    ).fetchone()
+    updated = _get_annual_event(conn, annual_event_id)
     conn.close()
 
-    return {"ok": True, "annual_event": dict(updated)}
+    return {"ok": True, "annual_event": updated}
+
+
+@mcp.tool()
+def delete_annual_event(annual_event_id: int) -> dict[str, Any]:
+    """Delete an annual event by id."""
+
+    conn = _connect()
+    existing = _get_annual_event(conn, annual_event_id)
+    if existing is None:
+        conn.close()
+        return {"ok": False, "error": f"Annual event {annual_event_id} not found"}
+
+    conn.execute("DELETE FROM annual_events WHERE id = ?", (annual_event_id,))
+    conn.commit()
+    conn.close()
+
+    return {"ok": True, "deleted_annual_event": existing}
 
 
 @mcp.tool()

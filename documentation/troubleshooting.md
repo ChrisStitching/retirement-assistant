@@ -129,11 +129,50 @@ Fixes:
 - Keep reusable defaults in [settings.example.json](../settings.example.json).
 - Do not commit machine-specific paths.
 
+### 8. Appointment end time is missing or causes query errors
+
+Symptoms:
+- Existing appointments do not show `appt_end_dt`.
+- Error similar to: `sqlite3.OperationalError: no such column: appt_end_dt`
+
+Cause:
+- Database file was created before appointment end-time support and has not been migrated yet.
+
+Fixes:
+- Restart the MCP server so runtime migration can apply automatically.
+- Run setup migration explicitly:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\setup_db.py
+```
+
+- Confirm you are pointing to the intended DB in [settings.local.json](../settings.local.json).
+
+### 9. New annual/timed/appointment MCP commands are not recognized
+
+Symptoms:
+- Prompts for list/update/delete flows fail even though code was updated.
+
+Cause:
+- MCP server process is still running an older version of `mcp/server.py`.
+
+Fixes:
+- Fully stop and restart the MCP server process.
+- Verify [.vscode/mcp.json](../.vscode/mcp.json) uses `.venv/Scripts/python.exe` and workspace root `cwd`.
+- Verify dependencies are installed in `.venv`:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip show mcp
+```
+
 ## Verification Checklist
 
 After setup, verify all of the following:
 - MCP server starts without traceback.
 - `get_daily_briefing` returns appointments/events and activity suggestions.
+- Appointment CRUD works through MCP, with end time optional.
+- Timed event CRUD works through MCP.
+- Annual event CRUD works through MCP.
 - Weather object appears when weather is enabled.
 - Recently completed activities are excluded according to `briefing_lookback_days`.
 - Recommendation filters behave as expected for readiness and temperature.

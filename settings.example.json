@@ -5,8 +5,8 @@
   "activity_suggestions_per_day": 3,
   "weather": {
     "enabled": false,
-    "latitude": 47.673,
-    "longitude": -122.121,
+    "latitude": 47.4502,
+    "longitude": -122.3088,
     "timezone": "America/Los_Angeles"
   }
 }

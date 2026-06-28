@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS appointments (
     title       TEXT NOT NULL,
     location    TEXT,
     appt_dt     TEXT NOT NULL,
+    appt_end_dt TEXT,
     notes       TEXT,
     created_at  TEXT DEFAULT (datetime('now'))
 );

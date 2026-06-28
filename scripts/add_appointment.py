@@ -16,6 +16,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Add an appointment.")
     parser.add_argument("--title", required=True)
     parser.add_argument("--appt-dt", required=True, help='ISO 8601 datetime, e.g. "2026-06-17T09:00"')
+    parser.add_argument("--appt-end-dt", default="", help='Optional ISO 8601 end datetime, e.g. "2026-06-17T10:00"')
     parser.add_argument("--location", default="")
     parser.add_argument("--notes", default="")
     args = parser.parse_args()
@@ -24,10 +25,16 @@ def main() -> None:
     with sqlite3.connect(db_path) as conn:
         conn.execute(
             """
-            INSERT INTO appointments (title, location, appt_dt, notes)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO appointments (title, location, appt_dt, appt_end_dt, notes)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (args.title, args.location or None, args.appt_dt, args.notes or None),
+            (
+                args.title,
+                args.location or None,
+                args.appt_dt,
+                args.appt_end_dt or None,
+                args.notes or None,
+            ),
         )
         conn.commit()
 

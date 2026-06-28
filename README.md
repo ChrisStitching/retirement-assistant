@@ -73,7 +73,7 @@ Keep `settings.local.json` out of source control (it is already git-ignored).
 3. Add sample data:
 
 	```powershell
-	python scripts/add_appointment.py --title "Dentist" --appt-dt "2026-06-17T09:00" --location "Main St Clinic"
+	python scripts/add_appointment.py --title "Dentist" --appt-dt "2026-06-17T09:00" --appt-end-dt "2026-06-17T10:00" --location "Main St Clinic"
 	python scripts/add_event.py --title "Summer Festival" --start-date "2026-06-23" --end-date "2026-06-28"
 	python scripts/add_annual_event.py --title "Microsoft hire anniversary" --event-date "2008-04-07" --description "Celebrate work anniversary" --reminder-days-before 7
 	python scripts/update_annual_event.py 1 --status "inactive"
@@ -99,10 +99,20 @@ The closest equivalent is MCP tools plus short natural-language command patterns
 
 After the MCP server is running, you can type prompts like:
 
-- Add appointment title "Dentist" at "2026-06-17T09:00" location "Main St Clinic" notes "Bring insurance card"
+- Add appointment title "Dentist" at "2026-06-17T09:00" end "2026-06-17T10:00" location "Main St Clinic" notes "Bring insurance card"
+- List appointments for "2026-06-17"
+- List appointments from "2026-06-17" to "2026-06-23"
+- Update appointment id 1 location "Main St Clinic" notes "Bring insurance card"
+- Delete appointment id 1
 - Add timed event title "Summer Festival" start "2026-06-23" end "2026-06-28" description "Community event"
+- List timed events from "2026-06-23" to "2026-06-28"
+- Update timed event id 1 url "https://example.com/festival" status "active"
+- Delete timed event id 1
 - Add annual event title "Microsoft hire anniversary" event_date "2008-04-07" description "Celebrate" reminder_days_before 7
+- List annual events
+- List annual events status "active"
 - Update annual event id 1 status "inactive"
+- Delete annual event id 1
 - Add activity title "Morning Walk" category "outdoor" weather_sensitive 1 physical_intensity 1 urls ["https://example.com/trail"]
 - Update activity id 1 location "Watershed Trailhead" urls ["https://example.com/parking", "https://example.com/map"]
 - Give me details for activity 1
@@ -116,9 +126,17 @@ Available MCP tools now include:
 - `get_daily_briefing`
 - `log_activity`
 - `add_appointment`
+- `list_appointments`
+- `update_appointment`
+- `delete_appointment`
 - `add_timed_event`
+- `list_timed_events`
+- `update_timed_event`
+- `delete_timed_event`
 - `add_annual_event`
+- `list_annual_events`
 - `update_annual_event`
+- `delete_annual_event`
 - `add_activity`
 - `update_activity`
 - `get_activity_details`
