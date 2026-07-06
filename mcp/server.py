@@ -1205,6 +1205,24 @@ def update_activity(
 
 
 @mcp.tool()
+def delete_activity(activity_id: int) -> dict[str, Any]:
+    """Delete an activity by id."""
+
+    conn = _connect()
+    existing = _get_activity(conn, activity_id)
+    if existing is None:
+        conn.close()
+        return {"ok": False, "error": f"Activity {activity_id} not found"}
+
+    conn.execute("DELETE FROM activity_log WHERE activity_id = ?", (activity_id,))
+    conn.execute("DELETE FROM activities WHERE id = ?", (activity_id,))
+    conn.commit()
+    conn.close()
+
+    return {"ok": True, "deleted_activity": existing}
+
+
+@mcp.tool()
 def get_activity_details(activity_id: int | None = None, title: str | None = None) -> dict[str, Any]:
     """Return details for a single activity by id or title fragment."""
 

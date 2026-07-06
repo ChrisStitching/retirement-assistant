@@ -4,6 +4,10 @@
 
 Retirement Assistant is a local-first planning system that helps manage daily life after retirement. It combines structured data (appointments, events, activity pool, and completion history) with MCP tools that let an AI assistant provide practical daily recommendations.
 
+## Related Documents
+
+- [ToDo](todo.md)
+
 Design priorities:
 - Keep personal data local in SQLite.
 - Support natural-language operation through MCP tools.
