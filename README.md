@@ -12,6 +12,7 @@ The assistant can:
 - Include annual recurring reminders on the day-of and in advance
 - Log completed activities and avoid repeating recently completed ones
 - Apply recommendation filters based on readiness, weather sensitivity, rain chance, and temperature
+- Apply a per-activity repeatability factor to extend or shorten the post-completion cooldown window
 - Manage activity metadata (category, intensity, links, notes)
 
 ## Structure
@@ -78,7 +79,7 @@ Keep `settings.local.json` out of source control (it is already git-ignored).
 	python scripts/add_annual_event.py --title "Microsoft hire anniversary" --event-date "2008-04-07" --description "Celebrate work anniversary" --reminder-days-before 7
 	python scripts/update_annual_event.py 1 --status "inactive"
 	python scripts/add_activity.py --title "Morning Walk" --category "outdoor" --weather-sensitive 1 --physical-intensity 1 --url "https://example.com/trail"
-	python scripts/update_activity.py 1 --location "Watershed Trailhead" --url "https://example.com/parking" --url "https://example.com/map"
+	python scripts/update_activity.py 1 --location "Watershed Trailhead" --repeatability-factor 1 --url "https://example.com/parking" --url "https://example.com/map"
 	```
 
 4. Start the MCP server (stdio):
@@ -114,7 +115,7 @@ After the MCP server is running, you can type prompts like:
 - Update annual event id 1 status "inactive"
 - Delete annual event id 1
 - Add activity title "Morning Walk" category "outdoor" weather_sensitive 1 physical_intensity 1 urls ["https://example.com/trail"]
-- Update activity id 1 location "Watershed Trailhead" urls ["https://example.com/parking", "https://example.com/map"]
+- Update activity id 1 location "Watershed Trailhead" repeatability_factor 1 urls ["https://example.com/parking", "https://example.com/map"]
 - Give me details for activity 1
 - Give me activity details for "Visit Grateful Bread"
 - Get daily briefing for 2026-06-10 rain_chance 40 readiness 25
@@ -163,6 +164,7 @@ Behavior:
 - Response now includes a `weather` object with `rain_chance`, `temperature_c_max`, `temperature_c_min`, `temperature_f_max`, `temperature_f_min`, and `source`.
 - Response now includes an `annual_reminders` array with recurring anniversary notifications.
 - Activities marked done within the last `briefing_lookback_days` (default 7) are excluded from recommendations.
+- Activity cooldown now uses `briefing_lookback_days * repeatability_factor` per activity (default factor `2`, so a default 7-day lookback means 14 days before resuggesting a completed activity).
 - Temperature-aware filtering is applied automatically when weather is available:
 	- Motorcycle category activities are excluded when daily high is below 55F.
 	- Physical intensity 3 activities are excluded when daily high is above 75F.

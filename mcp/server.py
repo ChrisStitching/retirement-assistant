@@ -185,7 +185,13 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     appointment_columns = _column_names(conn, "appointments")
     if "appt_end_dt" not in appointment_columns:
         conn.execute("ALTER TABLE appointments ADD COLUMN appt_end_dt TEXT")
-        conn.commit()
+
+    activity_columns = _column_names(conn, "activities")
+    if "repeatability_factor" not in activity_columns:
+        conn.execute("ALTER TABLE activities ADD COLUMN repeatability_factor REAL DEFAULT 2")
+
+    conn.execute("UPDATE activities SET repeatability_factor = 2 WHERE repeatability_factor IS NULL")
+    conn.commit()
 
 
 def _normalize_urls(urls: list[str] | None) -> list[str]:
@@ -223,6 +229,30 @@ def _hydrate_activities(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> li
     return activities
 
 
+def _unique_category_activity_rows(rows: list[sqlite3.Row], limit: int) -> list[sqlite3.Row]:
+    if limit <= 0:
+        return []
+
+    selected: list[sqlite3.Row] = []
+    seen_categories: set[str] = set()
+    for row in rows:
+        category_raw = row["category"]
+        if isinstance(category_raw, str):
+            category_key = category_raw.strip().lower() or "__uncategorized__"
+        else:
+            category_key = "__uncategorized__"
+
+        if category_key in seen_categories:
+            continue
+
+        seen_categories.add(category_key)
+        selected.append(row)
+        if len(selected) >= limit:
+            break
+
+    return selected
+
+
 def _replace_activity_urls(conn: sqlite3.Connection, activity_id: int, urls: list[str]) -> None:
     conn.execute("DELETE FROM activity_urls WHERE activity_id = ?", (activity_id,))
     if urls:
@@ -235,7 +265,7 @@ def _replace_activity_urls(conn: sqlite3.Connection, activity_id: int, urls: lis
 def _get_activity(conn: sqlite3.Connection, activity_id: int) -> dict[str, Any] | None:
     row = conn.execute(
         """
-        SELECT id, title, description, location, category, weather_sensitive, physical_intensity
+        SELECT id, title, description, location, category, weather_sensitive, physical_intensity, repeatability_factor
         FROM activities
         WHERE id = ?
         """,
@@ -300,7 +330,7 @@ def _find_activity_row(
     if activity_id is not None:
         row = conn.execute(
             """
-            SELECT id, title, description, location, category, weather_sensitive, physical_intensity
+            SELECT id, title, description, location, category, weather_sensitive, physical_intensity, repeatability_factor
             FROM activities
             WHERE id = ?
             """,
@@ -314,7 +344,7 @@ def _find_activity_row(
     normalized_title = title.strip()
     exact_matches = conn.execute(
         """
-        SELECT id, title, description, location, category, weather_sensitive, physical_intensity
+        SELECT id, title, description, location, category, weather_sensitive, physical_intensity, repeatability_factor
         FROM activities
         WHERE lower(title) = lower(?)
         ORDER BY title COLLATE NOCASE ASC
@@ -329,7 +359,7 @@ def _find_activity_row(
     search_term = f"%{normalized_title}%"
     partial_matches = conn.execute(
         """
-        SELECT id, title, description, location, category, weather_sensitive, physical_intensity
+        SELECT id, title, description, location, category, weather_sensitive, physical_intensity, repeatability_factor
         FROM activities
         WHERE lower(title) LIKE lower(?)
         ORDER BY title COLLATE NOCASE ASC
@@ -539,7 +569,6 @@ def get_daily_briefing(
     lookback_days = int(settings.get("briefing_lookback_days", 7))
     if lookback_days < 1:
         lookback_days = 1
-    lookback_window_days = lookback_days - 1
     recommendation_clauses = _activity_recommendation_clauses(
         rain_chance=effective_rain_chance,
         readiness=readiness,
@@ -549,22 +578,25 @@ def get_daily_briefing(
     if recommendation_clauses:
         recommendation_sql = "\n        AND " + "\n        AND ".join(recommendation_clauses)
 
-    activities = conn.execute(
+    candidate_activities = conn.execute(
         f"""
-        SELECT a.id, a.title, a.description, a.location, a.category, a.weather_sensitive, a.physical_intensity
+        SELECT a.id, a.title, a.description, a.location, a.category, a.weather_sensitive, a.physical_intensity, a.repeatability_factor
         FROM activities a
-        WHERE a.id NOT IN (
-            SELECT activity_id
-            FROM activity_log
-            WHERE status = 'done'
-              AND date(log_date) BETWEEN date(?, ? || ' day') AND date(?)
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM activity_log l
+            WHERE l.activity_id = a.id
+              AND l.status = 'done'
+              AND (julianday(date(?)) - julianday(date(l.log_date))) >= 0
+              AND (julianday(date(?)) - julianday(date(l.log_date))) < (? * coalesce(a.repeatability_factor, 2))
         )
         {recommendation_sql}
         ORDER BY random()
-        LIMIT ?
         """,
-        (target_date, f"-{lookback_window_days}", target_date, suggestion_count),
+        (target_date, target_date, lookback_days),
     ).fetchall()
+
+    activities = _unique_category_activity_rows(candidate_activities, suggestion_count)
 
     activity_suggestions = _hydrate_activities(conn, activities)
     conn.close()
@@ -1112,9 +1144,13 @@ def add_activity(
     category: str = "",
     weather_sensitive: int = 0,
     physical_intensity: int = 1,
+    repeatability_factor: float = 2,
     urls: list[str] | None = None,
 ) -> dict[str, Any]:
     """Add an activity suggestion to the activity pool."""
+
+    if repeatability_factor <= 0:
+        return {"ok": False, "error": "repeatability_factor must be greater than 0"}
 
     conn = _connect()
     cursor = conn.execute(
@@ -1125,9 +1161,10 @@ def add_activity(
             location,
             category,
             weather_sensitive,
-            physical_intensity
+            physical_intensity,
+            repeatability_factor
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         (
             title,
@@ -1136,6 +1173,7 @@ def add_activity(
             category or None,
             weather_sensitive,
             physical_intensity,
+            float(repeatability_factor),
         ),
     )
     activity_id = cursor.lastrowid
@@ -1160,6 +1198,7 @@ def update_activity(
     category: str | None = None,
     weather_sensitive: int | None = None,
     physical_intensity: int | None = None,
+    repeatability_factor: float | None = None,
     urls: list[str] | None = None,
 ) -> dict[str, Any]:
     """Update an existing activity. Empty strings clear text fields; passing urls replaces the URL list."""
@@ -1183,6 +1222,11 @@ def update_activity(
         updates["weather_sensitive"] = weather_sensitive
     if physical_intensity is not None:
         updates["physical_intensity"] = physical_intensity
+    if repeatability_factor is not None:
+        if repeatability_factor <= 0:
+            conn.close()
+            return {"ok": False, "error": "repeatability_factor must be greater than 0"}
+        updates["repeatability_factor"] = float(repeatability_factor)
 
     if "title" in updates and not updates["title"]:
         conn.close()

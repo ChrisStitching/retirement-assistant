@@ -63,6 +63,7 @@ Current tables:
 Modeling notes:
 - `weather_sensitive` is `0/1` and used for rain and heat constraints.
 - `physical_intensity` uses a 1-3 scale.
+- `repeatability_factor` scales post-completion cooldown per activity (default `2`).
 - `activity_log` is the primary source for recommendation suppression.
 
 ## MCP Tool Surface
@@ -97,7 +98,7 @@ These are optimized for conversational use while still returning explicit JSON f
 - Randomized activity suggestions after rule-based filtering.
 
 Activity filtering rules currently implemented:
-- Exclude activities logged as `done` within `briefing_lookback_days` (default 7).
+- Exclude activities logged as `done` within an activity-specific cooldown: `briefing_lookback_days * repeatability_factor`.
 - If `rain_chance > 30`, exclude weather-sensitive activities.
 - Readiness filter:
     - `< 30`: only intensity 1

@@ -21,6 +21,7 @@ def main() -> None:
     parser.add_argument("--category")
     parser.add_argument("--weather-sensitive", type=int, choices=[0, 1])
     parser.add_argument("--physical-intensity", type=int, choices=[1, 2, 3])
+    parser.add_argument("--repeatability-factor", type=float)
     parser.add_argument("--url", dest="urls", action="append")
     parser.add_argument("--clear-urls", action="store_true")
     args = parser.parse_args()
@@ -41,6 +42,10 @@ def main() -> None:
         updates["weather_sensitive"] = args.weather_sensitive
     if args.physical_intensity is not None:
         updates["physical_intensity"] = args.physical_intensity
+    if args.repeatability_factor is not None:
+        if args.repeatability_factor <= 0:
+            raise SystemExit("--repeatability-factor must be greater than 0")
+        updates["repeatability_factor"] = args.repeatability_factor
 
     replace_urls = args.clear_urls or args.urls is not None
     urls = []

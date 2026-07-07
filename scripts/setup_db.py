@@ -44,6 +44,12 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     if "appt_end_dt" not in appointment_columns:
         conn.execute("ALTER TABLE appointments ADD COLUMN appt_end_dt TEXT")
 
+    activity_columns = _column_names(conn, "activities")
+    if "repeatability_factor" not in activity_columns:
+        conn.execute("ALTER TABLE activities ADD COLUMN repeatability_factor REAL DEFAULT 2")
+
+    conn.execute("UPDATE activities SET repeatability_factor = 2 WHERE repeatability_factor IS NULL")
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Initialize the retirement assistant SQLite database.")
