@@ -148,10 +148,10 @@ Fixes:
 
 - Confirm you are pointing to the intended DB in [settings.local.json](../settings.local.json).
 
-### 9. New annual/timed/appointment MCP commands are not recognized
+### 9. New MCP commands are not recognized
 
 Symptoms:
-- Prompts for list/update/delete flows fail even though code was updated.
+- Prompts for details/list/update/delete flows fail even though code was updated.
 
 Cause:
 - MCP server process is still running an older version of `mcp/server.py`.
@@ -165,6 +165,24 @@ Fixes:
 .\.venv\Scripts\python.exe -m pip show mcp
 ```
 
+### 10. Recent tool changes appear to break behavior
+
+Symptoms:
+- A tool path that previously worked now returns validation or query errors.
+- A new MCP feature appears untested.
+
+Fixes:
+- Run scoped tests for the area you changed:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_activity_crud.py
+.\.venv\Scripts\python.exe -m pytest tests/test_appointment_crud.py
+.\.venv\Scripts\python.exe -m pytest tests/test_timed_event_crud.py
+.\.venv\Scripts\python.exe -m pytest tests/test_daily_briefing.py tests/test_weekday_constraints.py
+```
+
+- If behavior changed intentionally, add or update tests before merging.
+
 ## Verification Checklist
 
 After setup, verify all of the following:
@@ -173,9 +191,12 @@ After setup, verify all of the following:
 - Appointment CRUD works through MCP, with end time optional.
 - Timed event CRUD works through MCP.
 - Annual event CRUD works through MCP.
+- Activity CRUD and detail lookup work through MCP.
 - Weather object appears when weather is enabled.
 - Recently completed activities are excluded according to `briefing_lookback_days`.
 - Recommendation filters behave as expected for readiness and temperature.
+- Weekday availability filtering works when activities define `available_days`.
+- Daily briefing suggestions are limited to one activity per category when possible.
 
 ## Support Data To Collect When Debugging
 

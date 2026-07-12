@@ -5,13 +5,15 @@ Retirement assistant is a personal planning tool for day-to-day retirement activ
 It combines:
 - A SQLite database for activities, appointments, timed events, annual recurring events, and activity history
 - A Python MCP server with natural-language tools for Copilot
-- Lightweight CLI scripts for setup and optional direct data entry
+- A lightweight setup script for database initialization and maintenance
 
 The assistant can:
 - Build a daily briefing with appointments, active events, and activity suggestions
 - Include annual recurring reminders on the day-of and in advance
 - Log completed activities and avoid repeating recently completed ones
 - Apply recommendation filters based on readiness, weather sensitivity, rain chance, and temperature
+- Respect per-activity weekday availability when suggesting activities
+- Return at most one suggestion per activity category to improve variety
 - Apply a per-activity repeatability factor to extend or shorten the post-completion cooldown window
 - Manage activity metadata (category, intensity, links, notes)
 
@@ -19,17 +21,30 @@ The assistant can:
 
 ```
 retirement-assistant/
-├── .vscode/mcp.json
-├── db/schema.sql
-├── mcp/server.py
+├── .github/
+│   └── copilot-instructions.md
+├── .vscode/
+│   └── mcp.json
+├── db/
+│   └── schema.sql
+├── documentation/
+│   ├── design.md
+│   ├── todo.md
+│   └── troubleshooting.md
+├── mcp/
+│   └── server.py
 ├── scripts/
-│   ├── setup_db.py
-│   ├── add_appointment.py
-│   ├── add_event.py
-│   ├── add_annual_event.py
-│   ├── update_annual_event.py
-│   ├── add_activity.py
-│   └── update_activity.py
+│   └── setup_db.py
+├── tests/
+│   ├── conftest.py
+│   ├── test_activity_crud.py
+│   ├── test_appointment_crud.py
+│   ├── test_daily_briefing.py
+│   ├── test_timed_event_crud.py
+│   └── test_weekday_constraints.py
+├── LICENSE
+├── pytest.ini
+├── README.md
 ├── settings.example.json
 ├── settings.local.json
 ├── requirements.txt
@@ -71,22 +86,13 @@ Keep `settings.local.json` out of source control (it is already git-ignored).
 	python scripts/setup_db.py
 	```
 
-3. Add sample data:
-
-	```powershell
-	python scripts/add_appointment.py --title "Dentist" --appt-dt "2026-06-17T09:00" --appt-end-dt "2026-06-17T10:00" --location "Main St Clinic"
-	python scripts/add_event.py --title "Summer Festival" --start-date "2026-06-23" --end-date "2026-06-28"
-	python scripts/add_annual_event.py --title "Microsoft hire anniversary" --event-date "2008-04-07" --description "Celebrate work anniversary" --reminder-days-before 7
-	python scripts/update_annual_event.py 1 --status "inactive"
-	python scripts/add_activity.py --title "Morning Walk" --category "outdoor" --weather-sensitive 1 --physical-intensity 1 --url "https://example.com/trail"
-	python scripts/update_activity.py 1 --location "Watershed Trailhead" --repeatability-factor 1 --url "https://example.com/parking" --url "https://example.com/map"
-	```
-
-4. Start the MCP server (stdio):
+3. Start the MCP server (stdio):
 
 	```powershell
 	python mcp/server.py
 	```
+
+4. Use MCP prompts in Copilot chat to add and manage data (see examples below).
 
 ## Run Unit Tests
 
@@ -94,7 +100,16 @@ The test suite uses a temporary SQLite database per test run and only synthetic 
 It does not use your working database.
 
 ```powershell
-python -m pytest
+.\.venv\Scripts\python.exe -m pytest
+```
+
+Common scoped test commands:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_activity_crud.py
+.\.venv\Scripts\python.exe -m pytest tests/test_appointment_crud.py
+.\.venv\Scripts\python.exe -m pytest tests/test_timed_event_crud.py
+.\.venv\Scripts\python.exe -m pytest tests/test_daily_briefing.py tests/test_weekday_constraints.py
 ```
 
 ## Notes
@@ -124,9 +139,10 @@ After the MCP server is running, you can type prompts like:
 - Update annual event id 1 status "inactive"
 - Delete annual event id 1
 - Add activity title "Morning Walk" category "outdoor" weather_sensitive 1 physical_intensity 1 urls ["https://example.com/trail"]
-- Update activity id 1 location "Watershed Trailhead" repeatability_factor 1 urls ["https://example.com/parking", "https://example.com/map"]
+- Update activity id 1 location "Watershed Trailhead" repeatability_factor 1 available_days ["thursday", "saturday"] urls ["https://example.com/parking", "https://example.com/map"]
 - Give me details for activity 1
 - Give me activity details for "Visit Grateful Bread"
+- Delete activity id 1
 - Get daily briefing for 2026-06-10 rain_chance 40 readiness 25
 - Log activity id 3 status done notes "30 minute walk"
 - Get daily briefing for 2026-06-09
@@ -149,6 +165,7 @@ Available MCP tools now include:
 - `delete_annual_event`
 - `add_activity`
 - `update_activity`
+- `delete_activity`
 - `get_activity_details`
 
 ## Automatic Weather In Daily Briefing
@@ -174,6 +191,8 @@ Behavior:
 - Response now includes an `annual_reminders` array with recurring anniversary notifications.
 - Activities marked done within the last `briefing_lookback_days` (default 7) are excluded from recommendations.
 - Activity cooldown now uses `briefing_lookback_days * repeatability_factor` per activity (default factor `2`, so a default 7-day lookback means 14 days before resuggesting a completed activity).
+- Activities can be constrained to specific weekdays using `available_days`; daily briefing only suggests activities valid for the target date's weekday.
+- Daily briefing limits suggestions to one activity per category; if fewer categories qualify than requested, fewer suggestions are returned.
 - Temperature-aware filtering is applied automatically when weather is available:
 	- Motorcycle category activities are excluded when daily high is below 55F.
 	- Physical intensity 3 activities are excluded when daily high is above 75F.

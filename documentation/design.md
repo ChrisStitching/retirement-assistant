@@ -14,7 +14,7 @@ Design priorities:
 - Keep behavior deterministic and inspectable through simple SQL-backed logic.
 - Make recommendations context-aware (recent history, readiness, rain chance, and temperature).
 - Support recurring life milestones with annual reminder logic.
-- Prefer MCP tools as the default user-facing workflow, with CLI scripts as secondary fallbacks.
+- Prefer MCP tools as the default user-facing workflow, with scripts reserved for setup/maintenance.
 
 ## Current System Shape
 
@@ -23,7 +23,7 @@ flowchart LR
         U[User in VS Code Copilot Chat] --> M[MCP Tools]
         M --> S[mcp/server.py]
         S --> D[(SQLite: retirement.db)]
-        C[CLI scripts in scripts/] --> D
+    C[scripts/setup_db.py] --> D
         CFG[settings.local.json] --> S
         W[Open-Meteo API] --> S
 ```
@@ -42,11 +42,7 @@ Schema compatibility note:
 
 - `mcp/server.py`: MCP tool implementations and recommendation logic.
 - `db/schema.sql`: source-of-truth schema for local database initialization.
-- `scripts/setup_db.py`: initializes DB schema.
-- `scripts/add_activity.py`: CLI insert for activities.
-- `scripts/update_activity.py`: CLI updates for activities.
-- `scripts/add_appointment.py`: CLI insert for appointments.
-- `scripts/add_event.py`: CLI insert for timed events.
+- `scripts/setup_db.py`: initializes DB schema and applies compatibility migrations.
 - `settings.example.json`: shared template settings.
 - `settings.local.json`: local overrides (git-ignored) for personal paths/weather location.
 
@@ -64,6 +60,7 @@ Modeling notes:
 - `weather_sensitive` is `0/1` and used for rain and heat constraints.
 - `physical_intensity` uses a 1-3 scale.
 - `repeatability_factor` scales post-completion cooldown per activity (default `2`).
+- `day_of_week_mask` stores weekday availability for activities; MCP tools accept user-facing weekday names via `available_days`.
 - `activity_log` is the primary source for recommendation suppression.
 
 ## MCP Tool Surface
@@ -85,6 +82,7 @@ The MCP server currently exposes these capabilities:
 - `delete_annual_event`
 - `add_activity`
 - `update_activity`
+- `delete_activity`
 - `get_activity_details`
 
 These are optimized for conversational use while still returning explicit JSON for reliable behavior.
@@ -99,6 +97,7 @@ These are optimized for conversational use while still returning explicit JSON f
 
 Activity filtering rules currently implemented:
 - Exclude activities logged as `done` within an activity-specific cooldown: `briefing_lookback_days * repeatability_factor`.
+- Exclude activities that are not available on the target date weekday when `available_days` was provided.
 - If `rain_chance > 30`, exclude weather-sensitive activities.
 - Readiness filter:
     - `< 30`: only intensity 1
@@ -108,6 +107,10 @@ Activity filtering rules currently implemented:
     - If daily high `< 55F`: exclude category `motorcycle`
     - If daily high `> 75F`: exclude intensity 3
     - If daily high `> 85F`: exclude intensity 2 when weather-sensitive
+
+Selection rules currently implemented:
+- Candidate activities are randomized after filtering.
+- Final suggestions are capped to one activity per category to improve variety.
 
 Weather integration details:
 - Source: Open-Meteo forecast endpoint.
