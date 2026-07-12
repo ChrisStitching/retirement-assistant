@@ -47,6 +47,8 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
     activity_columns = _column_names(conn, "activities")
     if "repeatability_factor" not in activity_columns:
         conn.execute("ALTER TABLE activities ADD COLUMN repeatability_factor REAL DEFAULT 2")
+    if "day_of_week_mask" not in activity_columns:
+        conn.execute("ALTER TABLE activities ADD COLUMN day_of_week_mask INTEGER")
 
     conn.execute("UPDATE activities SET repeatability_factor = 2 WHERE repeatability_factor IS NULL")
 

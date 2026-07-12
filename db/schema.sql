@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS activities (
     category            TEXT,
     weather_sensitive   INTEGER DEFAULT 0,
     physical_intensity  INTEGER DEFAULT 1,
-    repeatability_factor REAL DEFAULT 2
+    repeatability_factor REAL DEFAULT 2,
+    day_of_week_mask    INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS activity_urls (

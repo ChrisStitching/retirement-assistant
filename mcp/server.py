@@ -65,6 +65,89 @@ def _parse_iso_datetime(value: str) -> datetime_type:
     return datetime_type.fromisoformat(value)
 
 
+_WEEKDAY_NAME_TO_INDEX = {
+    "monday": 0,
+    "mon": 0,
+    "tuesday": 1,
+    "tue": 1,
+    "tues": 1,
+    "wednesday": 2,
+    "wed": 2,
+    "thursday": 3,
+    "thu": 3,
+    "thur": 3,
+    "thurs": 3,
+    "friday": 4,
+    "fri": 4,
+    "saturday": 5,
+    "sat": 5,
+    "sunday": 6,
+    "sun": 6,
+}
+
+_WEEKDAY_INDEX_TO_NAME = [
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+]
+
+
+def _available_days_to_mask(available_days: str | list[str] | None) -> tuple[int | None, str | None]:
+    if available_days is None:
+        return None, None
+
+    tokens: list[str] = []
+    if isinstance(available_days, str):
+        raw_value = available_days.strip()
+        if not raw_value:
+            return None, None
+
+        if raw_value.startswith("[") and raw_value.endswith("]"):
+            raw_value = raw_value[1:-1]
+
+        if not raw_value.strip():
+            return None, None
+
+        tokens = [token.strip().strip("\"'") for token in raw_value.split(",")]
+    elif isinstance(available_days, list):
+        tokens = [str(token).strip() for token in available_days]
+    else:
+        return None, "available_days must be a weekday name or a list like [saturday,sunday]"
+
+    weekday_indices: set[int] = set()
+    for token in tokens:
+        if not token:
+            continue
+        weekday_index = _WEEKDAY_NAME_TO_INDEX.get(token.lower())
+        if weekday_index is None:
+            return None, f"Unrecognized weekday '{token}'"
+        weekday_indices.add(weekday_index)
+
+    if not weekday_indices:
+        return None, None
+
+    mask = 0
+    for weekday_index in weekday_indices:
+        mask |= 1 << weekday_index
+
+    return mask, None
+
+
+def _mask_to_available_days(mask: int | None) -> list[str]:
+    if mask is None:
+        return []
+
+    days: list[str] = []
+    for weekday_index, day_name in enumerate(_WEEKDAY_INDEX_TO_NAME):
+        if mask & (1 << weekday_index):
+            days.append(day_name)
+    return days
+
+
 def _validate_appointment_datetimes(appt_dt: str, appt_end_dt: str | None = None) -> str | None:
     try:
         start = _parse_iso_datetime(appt_dt)
@@ -189,6 +272,8 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     activity_columns = _column_names(conn, "activities")
     if "repeatability_factor" not in activity_columns:
         conn.execute("ALTER TABLE activities ADD COLUMN repeatability_factor REAL DEFAULT 2")
+    if "day_of_week_mask" not in activity_columns:
+        conn.execute("ALTER TABLE activities ADD COLUMN day_of_week_mask INTEGER")
 
     conn.execute("UPDATE activities SET repeatability_factor = 2 WHERE repeatability_factor IS NULL")
     conn.commit()
@@ -226,6 +311,7 @@ def _hydrate_activities(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> li
     urls_by_id = _activity_urls_by_id(conn, [activity["id"] for activity in activities])
     for activity in activities:
         activity["urls"] = urls_by_id.get(activity["id"], [])
+        activity["available_days"] = _mask_to_available_days(activity.get("day_of_week_mask"))
     return activities
 
 
@@ -265,7 +351,7 @@ def _replace_activity_urls(conn: sqlite3.Connection, activity_id: int, urls: lis
 def _get_activity(conn: sqlite3.Connection, activity_id: int) -> dict[str, Any] | None:
     row = conn.execute(
         """
-        SELECT id, title, description, location, category, weather_sensitive, physical_intensity, repeatability_factor
+        SELECT id, title, description, location, category, weather_sensitive, physical_intensity, repeatability_factor, day_of_week_mask
         FROM activities
         WHERE id = ?
         """,
@@ -330,7 +416,7 @@ def _find_activity_row(
     if activity_id is not None:
         row = conn.execute(
             """
-            SELECT id, title, description, location, category, weather_sensitive, physical_intensity, repeatability_factor
+            SELECT id, title, description, location, category, weather_sensitive, physical_intensity, repeatability_factor, day_of_week_mask
             FROM activities
             WHERE id = ?
             """,
@@ -344,7 +430,7 @@ def _find_activity_row(
     normalized_title = title.strip()
     exact_matches = conn.execute(
         """
-        SELECT id, title, description, location, category, weather_sensitive, physical_intensity, repeatability_factor
+        SELECT id, title, description, location, category, weather_sensitive, physical_intensity, repeatability_factor, day_of_week_mask
         FROM activities
         WHERE lower(title) = lower(?)
         ORDER BY title COLLATE NOCASE ASC
@@ -359,7 +445,7 @@ def _find_activity_row(
     search_term = f"%{normalized_title}%"
     partial_matches = conn.execute(
         """
-        SELECT id, title, description, location, category, weather_sensitive, physical_intensity, repeatability_factor
+        SELECT id, title, description, location, category, weather_sensitive, physical_intensity, repeatability_factor, day_of_week_mask
         FROM activities
         WHERE lower(title) LIKE lower(?)
         ORDER BY title COLLATE NOCASE ASC
@@ -425,6 +511,7 @@ def _activity_recommendation_clauses(
     rain_chance: int | None = None,
     readiness: int | None = None,
     temp_f_high: float | None = None,
+    target_weekday_index: int | None = None,
 ) -> list[str]:
     clauses: list[str] = []
 
@@ -446,6 +533,10 @@ def _activity_recommendation_clauses(
             clauses.append("a.physical_intensity != 3")
         if temp_f_high > 85:
             clauses.append("NOT (a.physical_intensity = 2 AND a.weather_sensitive = 1)")
+
+    if target_weekday_index is not None:
+        day_bit = 1 << target_weekday_index
+        clauses.append(f"(a.day_of_week_mask IS NULL OR (a.day_of_week_mask & {day_bit}) != 0)")
 
     return clauses
 
@@ -564,6 +655,7 @@ def get_daily_briefing(
     weather = _fetch_weather_for_date(target_date)
     effective_rain_chance = rain_chance if rain_chance is not None else (weather or {}).get("rain_chance")
     temp_f_high = (weather or {}).get("temperature_f_max")
+    target_weekday_index = _parse_iso_date(target_date).weekday()
 
     suggestion_count = int(settings.get("activity_suggestions_per_day", 3))
     lookback_days = int(settings.get("briefing_lookback_days", 7))
@@ -573,6 +665,7 @@ def get_daily_briefing(
         rain_chance=effective_rain_chance,
         readiness=readiness,
         temp_f_high=temp_f_high,
+        target_weekday_index=target_weekday_index,
     )
     recommendation_sql = ""
     if recommendation_clauses:
@@ -580,7 +673,7 @@ def get_daily_briefing(
 
     candidate_activities = conn.execute(
         f"""
-        SELECT a.id, a.title, a.description, a.location, a.category, a.weather_sensitive, a.physical_intensity, a.repeatability_factor
+        SELECT a.id, a.title, a.description, a.location, a.category, a.weather_sensitive, a.physical_intensity, a.repeatability_factor, a.day_of_week_mask
         FROM activities a
         WHERE NOT EXISTS (
             SELECT 1
@@ -1145,12 +1238,17 @@ def add_activity(
     weather_sensitive: int = 0,
     physical_intensity: int = 1,
     repeatability_factor: float = 2,
+    available_days: str | list[str] | None = None,
     urls: list[str] | None = None,
 ) -> dict[str, Any]:
     """Add an activity suggestion to the activity pool."""
 
     if repeatability_factor <= 0:
         return {"ok": False, "error": "repeatability_factor must be greater than 0"}
+
+    day_of_week_mask, day_parse_error = _available_days_to_mask(available_days)
+    if day_parse_error:
+        return {"ok": False, "error": day_parse_error}
 
     conn = _connect()
     cursor = conn.execute(
@@ -1162,9 +1260,10 @@ def add_activity(
             category,
             weather_sensitive,
             physical_intensity,
-            repeatability_factor
+            repeatability_factor,
+            day_of_week_mask
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             title,
@@ -1174,6 +1273,7 @@ def add_activity(
             weather_sensitive,
             physical_intensity,
             float(repeatability_factor),
+            day_of_week_mask,
         ),
     )
     activity_id = cursor.lastrowid
@@ -1199,6 +1299,7 @@ def update_activity(
     weather_sensitive: int | None = None,
     physical_intensity: int | None = None,
     repeatability_factor: float | None = None,
+    available_days: str | list[str] | None = None,
     urls: list[str] | None = None,
 ) -> dict[str, Any]:
     """Update an existing activity. Empty strings clear text fields; passing urls replaces the URL list."""
@@ -1227,6 +1328,12 @@ def update_activity(
             conn.close()
             return {"ok": False, "error": "repeatability_factor must be greater than 0"}
         updates["repeatability_factor"] = float(repeatability_factor)
+    if available_days is not None:
+        day_of_week_mask, day_parse_error = _available_days_to_mask(available_days)
+        if day_parse_error:
+            conn.close()
+            return {"ok": False, "error": day_parse_error}
+        updates["day_of_week_mask"] = day_of_week_mask
 
     if "title" in updates and not updates["title"]:
         conn.close()

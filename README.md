@@ -88,6 +88,15 @@ Keep `settings.local.json` out of source control (it is already git-ignored).
 	python mcp/server.py
 	```
 
+## Run Unit Tests
+
+The test suite uses a temporary SQLite database per test run and only synthetic fixture data.
+It does not use your working database.
+
+```powershell
+python -m pytest
+```
+
 ## Notes
 
 - `settings.local.json` is git-ignored to keep personal/local values out of the repository.
