@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Retirement Assistant is a local-first planning system that helps manage daily life after retirement. It combines structured data (appointments, events, activity pool, and completion history) with MCP tools that let an AI assistant provide practical daily recommendations.
+Retirement Assistant is a local-first planning system that helps manage daily life after retirement. It combines structured data (appointments, events, activity pool, and completion history) with MCP tools that let an AI assistant provide practical daily briefings and activity suggestions.
 
 ## Related Documents
 
@@ -12,7 +12,7 @@ Design priorities:
 - Keep personal data local in SQLite.
 - Support natural-language operation through MCP tools.
 - Keep behavior deterministic and inspectable through simple SQL-backed logic.
-- Make recommendations context-aware (recent history, readiness, rain chance, and temperature).
+- Make activity suggestions context-aware (recent history, readiness, rain chance, and temperature).
 - Support recurring life milestones with annual reminder logic.
 - Prefer MCP tools as the default user-facing workflow, with scripts reserved for setup/maintenance.
 
@@ -21,12 +21,12 @@ Design priorities:
 This section defines the domain model Copilot and contributors should use when designing or changing behavior.
 
 System objective:
-- Help the user plan each day with low-friction capture and high-signal recommendations.
+- Help the user plan each day with low-friction capture and high-signal activity suggestions.
 - Keep behavior explicit, testable, and local-first.
 
 Core concepts:
 - Daily briefing: a date-scoped snapshot that combines appointments, active timed events, annual reminders, and activity suggestions.
-- Activity: a reusable candidate for recommendations, with metadata that affects filtering (`category`, `weather_sensitive`, `physical_intensity`, `repeatability_factor`, optional weekday availability, and optional links).
+- Activity: a reusable candidate for activity suggestions, with metadata that affects filtering (`category`, `weather_sensitive`, `physical_intensity`, `repeatability_factor`, optional weekday availability, and optional links).
 - Readiness: a user-provided energy/capacity signal (commonly 0-100) that gates which intensity levels are eligible.
 - Weather sensitivity: whether an activity should be filtered out when rain chance is high and, in some rules, during high heat.
 - Category: a user-facing label used for organization and diversity limits (one suggestion per category in the current selection stage).
@@ -86,7 +86,7 @@ Schema compatibility note:
 
 ## Repository Components
 
-- `mcp/server.py`: MCP tool implementations and recommendation logic.
+- `mcp/server.py`: MCP tool implementations and activity suggestion logic.
 - `db/schema.sql`: source-of-truth schema for local database initialization.
 - `scripts/setup_db.py`: initializes DB schema and applies compatibility migrations.
 - `settings.example.json`: shared template settings.
@@ -98,7 +98,7 @@ Current tables:
 - `appointments`: start datetime (`appt_dt`), optional end datetime (`appt_end_dt`), and optional notes.
 - `timed_events`: date-range items with status lifecycle.
 - `annual_events`: recurring annual reminders using an anchor date and advance notice window.
-- `activities`: recommendation candidates with category, weather sensitivity, and physical intensity.
+- `activities`: activity suggestion candidates with category, weather sensitivity, and physical intensity.
 - `activity_urls`: one-to-many links for activities.
 - `activity_log`: history of suggested/completed/skipped outcomes.
 
@@ -107,7 +107,7 @@ Modeling notes:
 - `physical_intensity` uses a 1-3 scale.
 - `repeatability_factor` scales post-completion cooldown per activity (default `2`).
 - `day_of_week_mask` stores weekday availability for activities; MCP tools accept user-facing weekday names via `available_days`.
-- `activity_log` is the primary source for recommendation suppression.
+- `activity_log` is the primary source for activity suggestion suppression.
 
 ## MCP Tool Surface
 
@@ -133,7 +133,7 @@ The MCP server currently exposes these capabilities:
 
 These are optimized for conversational use while still returning explicit JSON for reliable behavior.
 
-## Recommendation Design
+## Activity Suggestion Design
 
 `get_daily_briefing` composes:
 - Appointments for target date and next day.
@@ -141,20 +141,12 @@ These are optimized for conversational use while still returning explicit JSON f
 - Annual reminders for recurring events (day-of and exact lead-time reminders).
 - Randomized activity suggestions after rule-based filtering.
 
-Activity filtering rules currently implemented:
+Activity suggestion filtering rules currently implemented:
 - Exclude activities logged as `done` within an activity-specific cooldown: `briefing_lookback_days * repeatability_factor`.
 - Exclude activities that are not available on the target date weekday when `available_days` was provided.
-- If `rain_chance > 30`, exclude weather-sensitive activities.
-- Readiness filter:
-    - `< 30`: only intensity 1
-    - `< 70`: intensity 1-2
-    - `>= 70`: intensity 2-3
-- Temperature-aware filters when weather data is available:
-    - If daily high `< 55F`: exclude category `motorcycle`
-    - If daily high `> 75F`: exclude intensity 3
-    - If daily high `> 85F`: exclude intensity 2 when weather-sensitive
+- Apply readiness, rain, and temperature filters as defined in the Conceptual Model above.
 
-Selection rules currently implemented:
+Activity suggestion selection rules currently implemented:
 - Candidate activities are randomized after filtering.
 - Final suggestions are capped to one activity per category to improve variety.
 
@@ -162,6 +154,35 @@ Weather integration details:
 - Source: Open-Meteo forecast endpoint.
 - Configured in `settings.local.json` with `weather.enabled`, coordinates, and timezone.
 - Daily briefing response includes a `weather` object with rain chance and min/max temperatures in C and F.
+
+### Daily Briefing Pipeline (Architectural Overview)
+
+All daily briefing logic is implemented in `mcp/server.py` inside the `get_daily_briefing` MCP tool.
+The client layer (Copilot) invokes the tool and formats the structured response.
+
+Pipeline steps:
+1. Resolve target date from tool input (`date`) or default to today.
+2. Open DB connection and apply compatibility migrations.
+3. Load configuration (`briefing_lookback_days`, `activity_suggestions_per_day`, and weather settings).
+4. Fetch appointments for target date and next day.
+5. Fetch active timed events spanning target date.
+6. Compute annual reminders (day-of anniversaries and exact lead-time reminders).
+7. Fetch weather (when enabled): rain chance plus min/max temperatures.
+8. Compute effective rain chance (explicit tool input wins; otherwise weather-derived value).
+9. Build activity suggestion clauses (readiness, rain, temperature, and weekday availability).
+10. Query candidate activities with cooldown suppression based on done logs and per-activity repeatability.
+11. Randomize candidate order and apply one-per-category diversity cap.
+12. Hydrate selected activities with URLs and available-days expansion.
+13. Return structured JSON containing date, weather/rain inputs, appointments, active timed events, annual reminders, and activity suggestions.
+
+Selection size note:
+- Suggestion count is configuration-driven via `activity_suggestions_per_day` (default `3`), not hardcoded.
+
+#### User Selection Model
+
+The assistant does not require explicit user pre-selection of an anchor activity.
+The user logs activities they actually performed later in the day.
+Logged `status` and `log_date` values then drive cooldown/repeatability behavior in future briefings.
 
 ## Configuration Strategy
 
@@ -189,7 +210,7 @@ Relevant settings keys:
 
 ## Known Constraints
 
-- Recommendation selection is randomized after filtering, so outputs vary per run.
+- Activity suggestion selection is randomized after filtering, so outputs vary per run.
 - Filtering depends on quality of activity metadata (category, intensity, weather sensitivity).
 - Weather dependency is external; briefing still functions when weather lookup is unavailable.
 

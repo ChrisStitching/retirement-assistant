@@ -8,10 +8,10 @@ It combines:
 - A lightweight setup script for database initialization and maintenance
 
 The assistant can:
-- Build a daily briefing with appointments, active events, and activity suggestions
+- Build a daily briefing with appointments, active timed events, annual reminders, and activity suggestions
 - Include annual recurring reminders on the day-of and in advance
 - Log completed activities and avoid repeating recently completed ones
-- Apply recommendation filters based on readiness, weather sensitivity, rain chance, and temperature
+- Apply activity-suggestion filters based on readiness, weather sensitivity, rain chance, and temperature
 - Respect per-activity weekday availability when suggesting activities
 - Return at most one suggestion per activity category to improve variety
 - Apply a per-activity repeatability factor to extend or shorten the post-completion cooldown window
@@ -81,19 +81,19 @@ Keep `settings.local.json` out of source control (it is already git-ignored).
 1. Install dependencies:
 
 	```powershell
-	pip install -r requirements.txt
+	.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 	```
 
 2. Initialize the database:
 
 	```powershell
-	python scripts/setup_db.py
+	.\.venv\Scripts\python.exe scripts/setup_db.py
 	```
 
 3. Start the MCP server (stdio):
 
 	```powershell
-	python mcp/server.py
+	.\.venv\Scripts\python.exe mcp/server.py
 	```
 
 4. Use MCP prompts in Copilot chat to add and manage data (see examples below).
@@ -189,18 +189,11 @@ Configuration in `settings.local.json`:
 
 Behavior:
 
-- If `rain_chance` is passed explicitly, that value is used for filtering suggestions.
+- If `rain_chance` is passed explicitly, that value is used for filtering activity suggestions.
 - If `rain_chance` is omitted, the server uses weather lookup rain chance when available.
 - Response now includes a `weather` object with `rain_chance`, `temperature_c_max`, `temperature_c_min`, `temperature_f_max`, `temperature_f_min`, and `source`.
 - Response now includes an `annual_reminders` array with recurring anniversary notifications.
-- Activities marked done within the last `briefing_lookback_days` (default 7) are excluded from recommendations.
-- Activity cooldown now uses `briefing_lookback_days * repeatability_factor` per activity (default factor `2`, so a default 7-day lookback means 14 days before resuggesting a completed activity).
-- Activities can be constrained to specific weekdays using `available_days`; daily briefing only suggests activities valid for the target date's weekday.
-- Daily briefing limits suggestions to one activity per category; if fewer categories qualify than requested, fewer suggestions are returned.
-- Temperature-aware filtering is applied automatically when weather is available:
-	- Motorcycle category activities are excluded when daily high is below 55F.
-	- Physical intensity 3 activities are excluded when daily high is above 75F.
-	- Weather-sensitive physical intensity 2 activities are excluded when daily high is above 85F.
+- Activity suggestion filtering and selection details, including cooldowns, weekday availability, category diversity, and temperature-aware rules, are documented in [Project Design](documentation/design.md).
 - If weather lookup is disabled or unavailable, briefing still works with `weather: null`.
 
 ---
