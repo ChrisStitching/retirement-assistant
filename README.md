@@ -73,6 +73,7 @@ Typical local overrides include:
 - `data_root`: your personal storage folder
 - `db_path`: your local SQLite file path
 - `weather`: location and timezone values for daily briefing weather lookup
+- `ranking`: planned weighting knobs for activity suggestion ranking (currently documented for upcoming work)
 
 Keep `settings.local.json` out of source control (it is already git-ignored).
 

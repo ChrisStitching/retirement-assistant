@@ -150,6 +150,84 @@ Activity suggestion selection rules currently implemented:
 - Candidate activities are randomized after filtering.
 - Final suggestions are capped to one activity per category to improve variety.
 
+### Proposed Implementation Spec: Weighted Activity Suggestion Ranking
+
+Status:
+- Planned backlog work (see `documentation/todo.md`, item 6).
+- Not implemented yet.
+
+Problem statement:
+- Current random selection can over-represent recently visited cities.
+- Activities never logged are useful discovery candidates and should be favored.
+- Behavior should prefer novelty and location diversity using ranking weights, not hard filters.
+
+Scope:
+1. Apply ranking only after existing eligibility filters pass (cooldown, weekday, readiness, weather).
+2. Keep one-per-category diversity cap in place.
+3. Keep final suggestion count driven by `activity_suggestions_per_day`.
+
+Ranking signals:
+1. Activity novelty signal (`novelty_score`): boost activities with no prior `activity_log` rows.
+2. City recency signal (`city_recency_score`): prefer cities that have not been visited recently.
+3. Activity recency signal (`activity_recency_score`): optionally prefer activities not done recently, beyond cooldown exclusion.
+
+Scoring model:
+- Compute a weighted score per candidate activity:
+
+    `score = novelty_weight * novelty_score + city_recency_weight * city_recency_score + activity_recency_weight * activity_recency_score`
+
+- Suggested default signal behavior:
+1. `novelty_score = 1.0` when never logged, else `0.0`.
+2. `city_recency_score` scaled to `0.0..1.0` from days-since-city-last-visited (higher is better).
+3. `activity_recency_score` scaled to `0.0..1.0` from days-since-activity-last-done (higher is better).
+
+Selection model:
+1. Use weighted random selection by score rather than strict deterministic sorting.
+2. This preserves variety while making high-score candidates more likely.
+3. Continue to enforce one suggestion per category in final picks.
+
+Tie and fallback behavior:
+1. If all candidate scores are equal, fall back to current random behavior.
+2. If location is missing or unparseable, treat city recency as neutral for that activity.
+3. If there is no historical log data, all candidates should receive neutral recency except novelty boosts.
+
+Location semantics for city recency:
+1. Use normalized city tokens derived from `activities.location`.
+2. Normalize case and trim whitespace before matching.
+3. Prefer a conservative parser first (exact/known city string) before adding more advanced parsing.
+
+Configuration plan:
+1. Add weights and tuning controls to `settings.example.json` with safe defaults.
+2. Allow user overrides in `settings.local.json`.
+3. Keep defaults documented in this design file.
+4. Initial suggested keys:
+     - `ranking.enabled`
+     - `ranking.novelty_weight`
+     - `ranking.city_recency_weight`
+     - `ranking.activity_recency_weight`
+     - `ranking.city_recency_window_days`
+
+Proposed default values (for first implementation pass):
+1. `ranking.enabled = false`
+2. `ranking.novelty_weight = 0.6`
+3. `ranking.city_recency_weight = 0.3`
+4. `ranking.activity_recency_weight = 0.1`
+5. `ranking.city_recency_window_days = 30`
+
+These defaults are intentionally conservative and should be tuned with test fixtures and real usage feedback.
+
+Response and explainability option:
+1. Keep existing response schema by default.
+2. Optional future enhancement: include per-suggestion ranking reasons in response payload for transparency.
+
+Test specification:
+1. Add focused ranking tests in `tests/test_daily_briefing.py`.
+2. Cover novelty priority: never-logged activity outranks previously logged activity when other factors are equal.
+3. Cover city diversity preference: less recently visited city is more likely than recently visited city when candidates are otherwise comparable.
+4. Cover mixed case: two never-logged activities in different cities should favor the less recently visited city.
+5. Cover fallback: equal/neutral scores retain valid random behavior without errors.
+6. Keep tests deterministic by controlling randomness with seeded behavior or repeatable selection strategy in test mode.
+
 Weather integration details:
 - Source: Open-Meteo forecast endpoint.
 - Configured in `settings.local.json` with `weather.enabled`, coordinates, and timezone.
@@ -202,6 +280,13 @@ Relevant settings keys:
 - `weather.longitude`
 - `weather.timezone`
 
+Planned ranking settings keys (feature not yet implemented):
+- `ranking.enabled`
+- `ranking.novelty_weight`
+- `ranking.city_recency_weight`
+- `ranking.activity_recency_weight`
+- `ranking.city_recency_window_days`
+
 ## Operational Notes
 
 - The MCP process must be restarted to pick up code or settings changes.
@@ -214,10 +299,13 @@ Relevant settings keys:
 - Filtering depends on quality of activity metadata (category, intensity, weather sensitivity).
 - Weather dependency is external; briefing still functions when weather lookup is unavailable.
 
-## Near-Term Evolution Options
+## Future Design Options
 
-- Add deterministic ranking/priority score on top of random selection.
+These are exploratory design directions, not the committed implementation backlog.
+
+- Add weighted activity suggestion ranking signals (for example, never-logged activity boost and city-recency weighting) to improve novelty and location diversity without hard filtering.
 - Add category rotation to reduce repeated themes across days.
 - Track and display why each suggested activity was selected.
 - Add optional geofenced weather profile presets for travel periods.
-- Add Google Calendar integration for two-way sync of appointments and timed events.
+- Add an outings planning mode for higher-commitment options that should be recommended a day or more in advance rather than decided the same day.
+- Add a home tasks mode that suggests at-home options when the user expects to stay in for the rest of the day.
