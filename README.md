@@ -56,6 +56,10 @@ retirement-assistant/
 - [Project Design](documentation/design.md)
 - [Troubleshooting Guide](documentation/troubleshooting.md)
 
+## Core Concepts
+
+The canonical domain model used for implementation and AI-assisted changes is maintained in the Conceptual Model section of [Project Design](documentation/design.md#conceptual-model-source-of-truth).
+
 ## Local Settings
 
 Use `settings.local.json` for personalized local paths and environment-specific values.

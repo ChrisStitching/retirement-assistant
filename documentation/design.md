@@ -16,6 +16,52 @@ Design priorities:
 - Support recurring life milestones with annual reminder logic.
 - Prefer MCP tools as the default user-facing workflow, with scripts reserved for setup/maintenance.
 
+## Conceptual Model (Source Of Truth)
+
+This section defines the domain model Copilot and contributors should use when designing or changing behavior.
+
+System objective:
+- Help the user plan each day with low-friction capture and high-signal recommendations.
+- Keep behavior explicit, testable, and local-first.
+
+Core concepts:
+- Daily briefing: a date-scoped snapshot that combines appointments, active timed events, annual reminders, and activity suggestions.
+- Activity: a reusable candidate for recommendations, with metadata that affects filtering (`category`, `weather_sensitive`, `physical_intensity`, `repeatability_factor`, optional weekday availability, and optional links).
+- Readiness: a user-provided energy/capacity signal (commonly 0-100) that gates which intensity levels are eligible.
+- Weather sensitivity: whether an activity should be filtered out when rain chance is high and, in some rules, during high heat.
+- Category: a user-facing label used for organization and diversity limits (one suggestion per category in the current selection stage).
+
+Default behavioral rules (current implementation):
+- Readiness bands:
+    - `< 30`: only intensity 1
+    - `< 70`: intensity 1-2
+    - `>= 70`: intensity 2-3
+- Rain filter:
+    - If `rain_chance > 30`, weather-sensitive activities are excluded.
+- Heat and temperature filters (when weather data is available):
+    - If daily high `< 55F`: exclude category `motorcycle`
+    - If daily high `> 75F`: exclude intensity 3
+    - If daily high `> 85F`: exclude intensity 2 when weather-sensitive
+
+User meaning (plain language):
+- Lower readiness days prefer easier activities.
+- Higher readiness days allow more demanding activities.
+- Weather-sensitive activities are considered fair-weather options.
+
+Category validation direction:
+- Categories should use a strict allowed list that is user-configurable.
+- Inputs should be normalized to lower-case before validation when case is the only mismatch.
+- Unknown categories should be hard-rejected with a gentle, actionable message that:
+    - names the invalid category,
+    - lists configured allowed categories, and
+    - explains how to add categories in `settings.local.json` before retrying.
+- This strict validation behavior is a design target and should be implemented with MCP + test updates.
+
+Configuration intent for tunable behavior:
+- Defaults should remain documented in this section.
+- User-specific overrides should be done in `settings.local.json`.
+- Any new threshold/category configuration keys should be added to `settings.example.json` and documented here.
+
 ## Current System Shape
 
 ```mermaid
