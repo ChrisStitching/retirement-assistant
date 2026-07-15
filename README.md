@@ -73,7 +73,7 @@ Typical local overrides include:
 - `data_root`: your personal storage folder
 - `db_path`: your local SQLite file path
 - `weather`: location and timezone values for daily briefing weather lookup
-- `ranking`: planned weighting knobs for activity suggestion ranking (currently documented for upcoming work)
+- `ranking`: weighting knobs for activity suggestion ranking
 
 Keep `settings.local.json` out of source control (it is already git-ignored).
 
@@ -196,6 +196,55 @@ Behavior:
 - Response now includes an `annual_reminders` array with recurring anniversary notifications.
 - Activity suggestion filtering and selection details, including cooldowns, weekday availability, category diversity, and temperature-aware rules, are documented in [Project Design](documentation/design.md).
 - If weather lookup is disabled or unavailable, briefing still works with `weather: null`.
+
+## Activity Suggestion Ranking Weights
+
+Weighted ranking for activity suggestions is configurable via settings.
+
+Planned score formula:
+
+```text
+score = (novelty_weight * novelty_score)
+      + (city_recency_weight * city_recency_score)
+      + (activity_recency_weight * activity_recency_score)
+```
+
+Signal meanings:
+- `novelty_score`: `1.0` when an activity has never been logged; otherwise `0.0`.
+- `city_recency_score`: gradual `0.0..1.0` scale based on days since the city was last visited, capped by `ranking.city_recency_window_days`.
+- `activity_recency_score`: gradual `0.0..1.0` scale based on days since the activity was last done, capped by the same recency window.
+
+Important:
+- Activity cooldown (`briefing_lookback_days * repeatability_factor`) remains a hard eligibility filter before ranking.
+- Ranking weights change preference among eligible candidates; they are not hard include/exclude switches.
+
+Ranking keys in `settings.local.json` (with defaults in `settings.example.json`):
+
+```json
+"ranking": {
+	"enabled": false,
+	"novelty_weight": 0.6,
+	"city_recency_weight": 0.3,
+	"activity_recency_weight": 0.1,
+	"city_recency_window_days": 30,
+	"random_seed": null
+}
+```
+
+Valid user value guidance:
+- `ranking.enabled`: boolean (`true` or `false`).
+- Weight values (`novelty_weight`, `city_recency_weight`, `activity_recency_weight`): non-negative numbers.
+- `ranking.city_recency_window_days`: positive integer (recommended `>= 1`).
+- `ranking.random_seed`: optional integer for reproducible selection, primarily useful in testing.
+
+Does the final score need to equal `1`?
+- No. The final score does not need to equal `1`.
+- If weights sum to `1.0`, max score is `1.0` when all component scores are `1.0`.
+- If weights sum to another value, max score scales to that sum.
+- Relative score differences drive ranking; exact absolute score value is less important.
+
+Practical recommendation:
+- Keep weights non-negative and close to summing to `1.0` for easier tuning and interpretation.
 
 ---
 

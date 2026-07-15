@@ -147,14 +147,12 @@ Activity suggestion filtering rules currently implemented:
 - Apply readiness, rain, and temperature filters as defined in the Conceptual Model above.
 
 Activity suggestion selection rules currently implemented:
-- Candidate activities are randomized after filtering.
+- Candidate activities are selected with one of two modes:
+    - Ranking enabled: weighted random selection using novelty, city recency, and activity recency scores.
+    - Ranking disabled: randomized selection after filtering.
 - Final suggestions are capped to one activity per category to improve variety.
 
-### Proposed Implementation Spec: Weighted Activity Suggestion Ranking
-
-Status:
-- Planned backlog work (see `documentation/todo.md`, item 6).
-- Not implemented yet.
+### Weighted Activity Suggestion Ranking
 
 Problem statement:
 - Current random selection can over-represent recently visited cities.
@@ -196,25 +194,23 @@ Location semantics for city recency:
 2. Normalize case and trim whitespace before matching.
 3. Prefer a conservative parser first (exact/known city string) before adding more advanced parsing.
 
-Configuration plan:
-1. Add weights and tuning controls to `settings.example.json` with safe defaults.
-2. Allow user overrides in `settings.local.json`.
-3. Keep defaults documented in this design file.
-4. Initial suggested keys:
-     - `ranking.enabled`
-     - `ranking.novelty_weight`
-     - `ranking.city_recency_weight`
-     - `ranking.activity_recency_weight`
-     - `ranking.city_recency_window_days`
+Configuration keys:
+1. `ranking.enabled`
+2. `ranking.novelty_weight`
+3. `ranking.city_recency_weight`
+4. `ranking.activity_recency_weight`
+5. `ranking.city_recency_window_days`
+6. `ranking.random_seed` (optional, mainly useful for deterministic testing)
 
-Proposed default values (for first implementation pass):
+Default values:
 1. `ranking.enabled = false`
 2. `ranking.novelty_weight = 0.6`
 3. `ranking.city_recency_weight = 0.3`
 4. `ranking.activity_recency_weight = 0.1`
 5. `ranking.city_recency_window_days = 30`
+6. `ranking.random_seed = null`
 
-These defaults are intentionally conservative and should be tuned with test fixtures and real usage feedback.
+These defaults are intentionally conservative and should be tuned with usage feedback.
 
 Response and explainability option:
 1. Keep existing response schema by default.
@@ -280,12 +276,13 @@ Relevant settings keys:
 - `weather.longitude`
 - `weather.timezone`
 
-Planned ranking settings keys (feature not yet implemented):
+Ranking settings keys:
 - `ranking.enabled`
 - `ranking.novelty_weight`
 - `ranking.city_recency_weight`
 - `ranking.activity_recency_weight`
 - `ranking.city_recency_window_days`
+- `ranking.random_seed`
 
 ## Operational Notes
 
@@ -303,7 +300,6 @@ Planned ranking settings keys (feature not yet implemented):
 
 These are exploratory design directions, not the committed implementation backlog.
 
-- Add weighted activity suggestion ranking signals (for example, never-logged activity boost and city-recency weighting) to improve novelty and location diversity without hard filtering.
 - Add category rotation to reduce repeated themes across days.
 - Track and display why each suggested activity was selected.
 - Add optional geofenced weather profile presets for travel periods.

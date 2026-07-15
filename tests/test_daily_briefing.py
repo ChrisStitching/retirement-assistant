@@ -79,3 +79,156 @@ def test_daily_briefing_suggestions_are_unique_by_category(isolated_server):
     categories = [_category_key(activity.get("category")) for activity in briefing["activity_suggestions"]]
 
     assert len(categories) == len(set(categories))
+
+
+def test_daily_briefing_ranking_prioritizes_never_logged_activity(isolated_server, monkeypatch):
+    server, _ = isolated_server
+
+    monkeypatch.setattr(
+        server,
+        "_load_settings",
+        lambda: {
+            "activity_suggestions_per_day": 1,
+            "briefing_lookback_days": 7,
+            "weather": {"enabled": False},
+            "ranking": {
+                "enabled": True,
+                "novelty_weight": 1.0,
+                "city_recency_weight": 0.0,
+                "activity_recency_weight": 0.0,
+                "city_recency_window_days": 30,
+                "random_seed": 42,
+            },
+        },
+    )
+
+    logged_id = server.add_activity(
+        title="Synthetic Logged Activity",
+        category="coffee",
+        location="Redmond",
+        repeatability_factor=1,
+        physical_intensity=1,
+    )["id"]
+    novel_id = server.add_activity(
+        title="Synthetic Novel Activity",
+        category="hiking",
+        location="Bellevue",
+        repeatability_factor=1,
+        physical_intensity=1,
+    )["id"]
+
+    server.log_activity(activity_id=logged_id, status="done", log_date="2026-06-10")
+
+    briefing = server.get_daily_briefing(date="2026-07-14", rain_chance=0, readiness=50)
+    suggestion_ids = [activity["id"] for activity in briefing["activity_suggestions"]]
+
+    assert suggestion_ids == [novel_id]
+    assert logged_id not in suggestion_ids
+
+
+def test_daily_briefing_ranking_prefers_less_recent_city(isolated_server, monkeypatch):
+    server, _ = isolated_server
+
+    monkeypatch.setattr(
+        server,
+        "_load_settings",
+        lambda: {
+            "activity_suggestions_per_day": 1,
+            "briefing_lookback_days": 7,
+            "weather": {"enabled": False},
+            "ranking": {
+                "enabled": True,
+                "novelty_weight": 0.0,
+                "city_recency_weight": 1.0,
+                "activity_recency_weight": 0.0,
+                "city_recency_window_days": 30,
+                "random_seed": 7,
+            },
+        },
+    )
+
+    recent_city_anchor = server.add_activity(
+        title="Recent City Anchor",
+        category="anchor",
+        location="Redmond",
+        repeatability_factor=1,
+        physical_intensity=3,
+    )["id"]
+    old_city_anchor = server.add_activity(
+        title="Old City Anchor",
+        category="anchor",
+        location="Seattle",
+        repeatability_factor=1,
+        physical_intensity=3,
+    )["id"]
+
+    recent_candidate = server.add_activity(
+        title="Recent City Candidate",
+        category="coffee",
+        location="Redmond",
+        repeatability_factor=1,
+        physical_intensity=1,
+    )["id"]
+    old_candidate = server.add_activity(
+        title="Old City Candidate",
+        category="hiking",
+        location="Seattle",
+        repeatability_factor=1,
+        physical_intensity=1,
+    )["id"]
+
+    server.log_activity(activity_id=recent_city_anchor, status="done", log_date="2026-07-13")
+    server.log_activity(activity_id=old_city_anchor, status="done", log_date="2026-06-01")
+
+    briefing = server.get_daily_briefing(date="2026-07-14", rain_chance=0, readiness=50)
+    suggestion_ids = [activity["id"] for activity in briefing["activity_suggestions"]]
+
+    assert suggestion_ids == [old_candidate]
+    assert recent_candidate not in suggestion_ids
+
+
+def test_daily_briefing_ranking_zero_weights_falls_back_without_errors(isolated_server, monkeypatch):
+    server, _ = isolated_server
+
+    monkeypatch.setattr(
+        server,
+        "_load_settings",
+        lambda: {
+            "activity_suggestions_per_day": 3,
+            "briefing_lookback_days": 7,
+            "weather": {"enabled": False},
+            "ranking": {
+                "enabled": True,
+                "novelty_weight": 0.0,
+                "city_recency_weight": 0.0,
+                "activity_recency_weight": 0.0,
+                "city_recency_window_days": 30,
+                "random_seed": 123,
+            },
+        },
+    )
+
+    server.add_activity(
+        title="Fallback Candidate A",
+        category="hiking",
+        repeatability_factor=1,
+        physical_intensity=1,
+    )
+    server.add_activity(
+        title="Fallback Candidate B",
+        category="coffee",
+        repeatability_factor=1,
+        physical_intensity=1,
+    )
+    server.add_activity(
+        title="Fallback Candidate C",
+        category="shopping",
+        repeatability_factor=1,
+        physical_intensity=1,
+    )
+
+    briefing = server.get_daily_briefing(date="2026-07-14", rain_chance=0, readiness=50)
+    categories = [_category_key(activity.get("category")) for activity in briefing["activity_suggestions"]]
+
+    assert len(briefing["activity_suggestions"]) > 0
+    assert len(categories) == len(set(categories))

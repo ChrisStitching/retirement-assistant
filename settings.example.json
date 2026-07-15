@@ -8,7 +8,8 @@
     "novelty_weight": 0.6,
     "city_recency_weight": 0.3,
     "activity_recency_weight": 0.1,
-    "city_recency_window_days": 30
+    "city_recency_window_days": 30,
+    "random_seed": null
   },
   "weather": {
     "enabled": false,

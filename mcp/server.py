@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 import ssl
 import sqlite3
 import calendar
@@ -337,6 +338,194 @@ def _unique_category_activity_rows(rows: list[sqlite3.Row], limit: int) -> list[
             break
 
     return selected
+
+
+def _category_key(category: str | None) -> str:
+    if isinstance(category, str) and category.strip():
+        return category.strip().lower()
+    return "__uncategorized__"
+
+
+def _city_token(location: Any) -> str | None:
+    if not isinstance(location, str):
+        return None
+    normalized = location.strip().lower()
+    if not normalized:
+        return None
+    return normalized.split(",", 1)[0].strip() or None
+
+
+def _normalize_non_negative(value: Any, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed < 0:
+        return default
+    return parsed
+
+
+def _normalize_positive_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed < 1:
+        return default
+    return parsed
+
+
+def _ranking_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    ranking_raw = settings.get("ranking")
+    ranking = ranking_raw if isinstance(ranking_raw, dict) else {}
+
+    enabled = bool(ranking.get("enabled", False))
+    novelty_weight = _normalize_non_negative(ranking.get("novelty_weight", 0.6), 0.6)
+    city_weight = _normalize_non_negative(ranking.get("city_recency_weight", 0.3), 0.3)
+    activity_weight = _normalize_non_negative(ranking.get("activity_recency_weight", 0.1), 0.1)
+    city_window_days = _normalize_positive_int(ranking.get("city_recency_window_days", 30), 30)
+
+    random_seed: int | None = None
+    random_seed_raw = ranking.get("random_seed")
+    if random_seed_raw is not None:
+        try:
+            random_seed = int(random_seed_raw)
+        except (TypeError, ValueError):
+            random_seed = None
+
+    return {
+        "enabled": enabled,
+        "novelty_weight": novelty_weight,
+        "city_weight": city_weight,
+        "activity_weight": activity_weight,
+        "city_window_days": city_window_days,
+        "random_seed": random_seed,
+    }
+
+
+def _days_since(target: date_type, log_date_value: str) -> int | None:
+    try:
+        log_date = _parse_iso_date(log_date_value)
+    except ValueError:
+        return None
+    return (target - log_date).days
+
+
+def _scale_days(days: int | None, window_days: int) -> float:
+    if days is None:
+        return 0.5
+    if days <= 0:
+        return 0.0
+    return min(days, window_days) / float(window_days)
+
+
+def _weighted_random_unique_category_rows(
+    rows: list[sqlite3.Row],
+    scores_by_id: dict[int, float],
+    limit: int,
+    rng: random.Random,
+) -> list[sqlite3.Row]:
+    if limit <= 0:
+        return []
+
+    remaining = list(rows)
+    selected: list[sqlite3.Row] = []
+    seen_categories: set[str] = set()
+
+    while remaining and len(selected) < limit:
+        candidates = [row for row in remaining if _category_key(row["category"]) not in seen_categories]
+        if not candidates:
+            break
+
+        weights = [max(0.0, float(scores_by_id.get(int(row["id"]), 0.0))) for row in candidates]
+        if sum(weights) <= 0:
+            pick = rng.choice(candidates)
+        else:
+            pick = rng.choices(candidates, weights=weights, k=1)[0]
+
+        selected.append(pick)
+        pick_id = int(pick["id"])
+        seen_categories.add(_category_key(pick["category"]))
+        remaining = [row for row in remaining if int(row["id"]) != pick_id]
+
+    return selected
+
+
+def _ranked_activity_rows(
+    conn: sqlite3.Connection,
+    rows: list[sqlite3.Row],
+    target_date: str,
+    ranking: dict[str, Any],
+    limit: int,
+) -> list[sqlite3.Row]:
+    if limit <= 0 or not rows:
+        return []
+
+    target = _parse_iso_date(target_date)
+    window_days = int(ranking["city_window_days"])
+    novelty_weight = float(ranking["novelty_weight"])
+    city_weight = float(ranking["city_weight"])
+    activity_weight = float(ranking["activity_weight"])
+
+    candidate_ids = [int(row["id"]) for row in rows]
+
+    any_logs_rows = conn.execute(
+        f"SELECT DISTINCT activity_id FROM activity_log WHERE activity_id IN ({', '.join('?' for _ in candidate_ids)})",
+        candidate_ids,
+    ).fetchall()
+    logged_activity_ids = {int(row["activity_id"]) for row in any_logs_rows}
+
+    activity_done_rows = conn.execute(
+        f"""
+        SELECT activity_id, MAX(log_date) AS last_done
+        FROM activity_log
+        WHERE status = 'done' AND activity_id IN ({', '.join('?' for _ in candidate_ids)})
+        GROUP BY activity_id
+        """,
+        candidate_ids,
+    ).fetchall()
+    last_done_by_activity: dict[int, str] = {
+        int(row["activity_id"]): row["last_done"]
+        for row in activity_done_rows
+        if isinstance(row["last_done"], str) and row["last_done"].strip()
+    }
+
+    city_done_rows = conn.execute(
+        """
+        SELECT a.location AS location, l.log_date AS log_date
+        FROM activity_log l
+        JOIN activities a ON a.id = l.activity_id
+        WHERE l.status = 'done'
+        ORDER BY l.log_date DESC, l.id DESC
+        """
+    ).fetchall()
+    last_done_by_city: dict[str, str] = {}
+    for row in city_done_rows:
+        city = _city_token(row["location"])
+        if city is None or city in last_done_by_city:
+            continue
+        log_date_value = row["log_date"]
+        if isinstance(log_date_value, str) and log_date_value.strip():
+            last_done_by_city[city] = log_date_value
+
+    scores_by_id: dict[int, float] = {}
+    for row in rows:
+        activity_id = int(row["id"])
+
+        novelty_score = 1.0 if activity_id not in logged_activity_ids else 0.0
+
+        city = _city_token(row["location"])
+        city_days = _days_since(target, last_done_by_city[city]) if city is not None and city in last_done_by_city else None
+        city_score = _scale_days(city_days, window_days)
+
+        activity_days = _days_since(target, last_done_by_activity[activity_id]) if activity_id in last_done_by_activity else None
+        activity_score = _scale_days(activity_days, window_days)
+
+        score = (novelty_weight * novelty_score) + (city_weight * city_score) + (activity_weight * activity_score)
+        scores_by_id[activity_id] = max(0.0, score)
+
+    rng = random.Random(ranking["random_seed"]) if ranking["random_seed"] is not None else random.Random()
+    return _weighted_random_unique_category_rows(rows, scores_by_id, limit, rng)
 
 
 def _replace_activity_urls(conn: sqlite3.Connection, activity_id: int, urls: list[str]) -> None:
@@ -684,12 +873,23 @@ def get_daily_briefing(
               AND (julianday(date(?)) - julianday(date(l.log_date))) < (? * coalesce(a.repeatability_factor, 2))
         )
         {recommendation_sql}
-        ORDER BY random()
         """,
         (target_date, target_date, lookback_days),
     ).fetchall()
 
-    activities = _unique_category_activity_rows(candidate_activities, suggestion_count)
+    ranking = _ranking_settings(settings)
+    if ranking["enabled"]:
+        activities = _ranked_activity_rows(
+            conn=conn,
+            rows=candidate_activities,
+            target_date=target_date,
+            ranking=ranking,
+            limit=suggestion_count,
+        )
+    else:
+        shuffled_candidates = list(candidate_activities)
+        random.shuffle(shuffled_candidates)
+        activities = _unique_category_activity_rows(shuffled_candidates, suggestion_count)
 
     activity_suggestions = _hydrate_activities(conn, activities)
     conn.close()
