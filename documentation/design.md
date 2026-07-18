@@ -8,7 +8,7 @@ Retirement Assistant is a local-first planning system that helps manage daily li
 
 - [ToDo](todo.md)
 
-Design priorities:
+## Design priorities:
 - Keep personal data local in SQLite.
 - Support natural-language operation through MCP tools.
 - Keep behavior deterministic and inspectable through simple SQL-backed logic.
@@ -61,6 +61,47 @@ Configuration intent for tunable behavior:
 - Defaults should remain documented in this section.
 - User-specific overrides should be done in `settings.local.json`.
 - Any new threshold/category configuration keys should be added to `settings.example.json` and documented here.
+
+## Planner Mode (Approved Direction)
+
+Planner mode is an approved architecture direction and should be built as a separate mode that coexists with current daily briefing behavior until cutover criteria are met.
+
+Rollout contract:
+- Keep `get_daily_briefing` behavior stable during planner build-out.
+- Add planner-specific MCP tools and persistence first.
+- Replace daily briefing flow only after planner behavior is stable and validated.
+
+Planner domain rules:
+- One persisted daily plan per date.
+- Regeneration replaces the existing same-date plan atomically (no revision history in v1 planner rollout).
+- User chooses from 2-3 anchor options first; only then is a plan generated and persisted.
+- Activities are reusable components selected through templates, not standalone planner suggestions.
+
+Appointment planner rules:
+- Appointment classification is time-boundary based using config key `planner.appointment_split_hour`.
+- If `appt_end_dt` is missing, default to `appt_dt + planner.default_appointment_duration_minutes`.
+- Classification:
+    - `morning_only`: start and end before boundary
+    - `afternoon_only`: start and end after boundary
+    - `all_day`: crosses boundary
+- Mandatory appointments are hard constraints.
+- Mandatory appointments must not overlap and must satisfy `planner.min_travel_buffer_minutes` between consecutive appointments.
+- If multiple mandatory appointments exist on the same date, treat the day as all-day, include all mandatory appointments, and suppress optional template components.
+
+Planner defaults and local override intent:
+- `settings.example.json` planner defaults should include:
+    - `appointment_split_hour = 12`
+    - `default_appointment_duration_minutes = 60`
+    - `min_travel_buffer_minutes = 45`
+- `settings.local.json` may override local preference values (for example split hour `13`).
+
+Scout lifecycle in planner mode:
+- Completed scouts are retired from active pool while history is retained.
+- Follow-up creation is user-driven, not automatic.
+- Supported outcomes can be combined: create new scouts/activities, retire scout, and convert scout to mature activity/anchor.
+
+Implementation status note:
+- Planner mode is planned and documented here; current runtime remains the daily briefing model below until planner implementation lands.
 
 ## Current System Shape
 
