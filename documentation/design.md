@@ -76,6 +76,8 @@ Planner domain rules:
 - Regeneration replaces the existing same-date plan atomically (no revision history in v1 planner rollout).
 - User chooses from 2-3 anchor options first; only then is a plan generated and persisted.
 - Activities are reusable components selected through templates, not standalone planner suggestions.
+- Slot matching is strict: planner uses explicit `activity_type` only (no type inference from category/text).
+- For `anchor_city` scope, planner requires an explicit city match; null/blank city does not match.
 
 Appointment planner rules:
 - Appointment classification is time-boundary based using config key `planner.appointment_split_hour`.
@@ -148,6 +150,7 @@ Modeling notes:
 - `physical_intensity` uses a 1-3 scale.
 - `repeatability_factor` scales post-completion cooldown per activity (default `2`).
 - `day_of_week_mask` stores weekday availability for activities; MCP tools accept user-facing weekday names via `available_days`.
+- `activity_type` supports: `eatery`, `landmark`, `hiking`, `geocache`, `errand`, `cozy_task`, `scout`.
 - `activity_log` is the primary source for activity suggestion suppression.
 
 ## MCP Tool Surface

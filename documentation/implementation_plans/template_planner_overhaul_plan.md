@@ -5,6 +5,9 @@ Implement the planner overhaul as a new persisted planning mode that coexists wi
 
 This plan is implementation-focused and includes schema, MCP behavior, migration strategy, and test coverage requirements.
 
+Detailed schema baseline for implementation:
+- `documentation/implementation_plans/schema_delta_template_planner_v1.md`
+
 ## Confirmed Decisions
 - Planner ships as a separate mode first; replaces briefing flow later.
 - Exactly one persisted daily plan per date.

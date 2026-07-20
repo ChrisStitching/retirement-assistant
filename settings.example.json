@@ -3,6 +3,11 @@
   "db_path": "C:/Users/YOU/OneDrive/Assistant/retirement.db",
   "briefing_lookback_days": 7,
   "activity_suggestions_per_day": 3,
+  "planner": {
+    "appointment_split_hour": 12,
+    "default_appointment_duration_minutes": 60,
+    "min_travel_buffer_minutes": 45
+  },
   "ranking": {
     "enabled": false,
     "novelty_weight": 0.6,

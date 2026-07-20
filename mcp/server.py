@@ -8,6 +8,7 @@ import sqlite3
 import calendar
 from datetime import date as date_type
 from datetime import datetime as datetime_type
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -96,6 +97,9 @@ _WEEKDAY_INDEX_TO_NAME = [
     "sunday",
 ]
 
+_ACTIVITY_TYPES = {"eatery", "landmark", "hiking", "geocache", "errand", "cozy_task", "scout"}
+_ACTIVITY_STATUSES = {"active", "retired"}
+
 
 def _available_days_to_mask(available_days: str | list[str] | None) -> tuple[int | None, str | None]:
     if available_days is None:
@@ -162,6 +166,114 @@ def _validate_appointment_datetimes(appt_dt: str, appt_end_dt: str | None = None
             return "appt_end_dt must be ISO 8601 like 2026-06-17T10:00"
         if end < start:
             return "appt_end_dt must be on or after appt_dt"
+
+    return None
+
+
+def _planner_settings(settings: dict[str, Any] | None = None) -> dict[str, int]:
+    loaded = settings if settings is not None else _load_settings()
+    planner_raw = loaded.get("planner") if isinstance(loaded, dict) else None
+    planner = planner_raw if isinstance(planner_raw, dict) else {}
+
+    split_hour = _normalize_positive_int(planner.get("appointment_split_hour", 12), 12)
+    if split_hour > 23:
+        split_hour = 23
+
+    default_duration_minutes = _normalize_positive_int(planner.get("default_appointment_duration_minutes", 60), 60)
+    min_travel_buffer_minutes = _normalize_positive_int(planner.get("min_travel_buffer_minutes", 45), 45)
+
+    return {
+        "appointment_split_hour": split_hour,
+        "default_appointment_duration_minutes": default_duration_minutes,
+        "min_travel_buffer_minutes": min_travel_buffer_minutes,
+    }
+
+
+def _normalized_planning_disposition(value: str | None) -> tuple[str | None, str | None]:
+    normalized = (value or "optional").strip().lower()
+    if normalized not in {"optional", "mandatory"}:
+        return None, "planning_disposition must be optional or mandatory"
+    return normalized, None
+
+
+def _effective_appointment_end(appt_dt: str, appt_end_dt: str | None, default_duration_minutes: int) -> str:
+    if isinstance(appt_end_dt, str) and appt_end_dt.strip():
+        return appt_end_dt.strip()
+
+    start = _parse_iso_datetime(appt_dt)
+    derived_end = start + timedelta(minutes=default_duration_minutes)
+    return derived_end.isoformat(timespec="minutes")
+
+
+def _appointment_duration_class(appt_dt: str, appt_end_dt: str, split_hour: int) -> str:
+    start = _parse_iso_datetime(appt_dt)
+    end = _parse_iso_datetime(appt_end_dt)
+    boundary = start.replace(hour=split_hour, minute=0, second=0, microsecond=0)
+
+    if start < boundary and end <= boundary:
+        return "morning_only"
+    if start >= boundary and end > boundary:
+        return "afternoon_only"
+    return "all_day"
+
+
+def _appointment_payload(row: sqlite3.Row | dict[str, Any], settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = dict(row)
+    planner = _planner_settings(settings)
+    default_duration = planner["default_appointment_duration_minutes"]
+    split_hour = planner["appointment_split_hour"]
+
+    effective_end = _effective_appointment_end(str(payload["appt_dt"]), payload.get("appt_end_dt"), default_duration)
+    payload["appt_end_dt"] = effective_end
+    payload["planning_disposition"] = str(payload.get("planning_disposition") or "optional").strip().lower()
+    payload["duration_class"] = _appointment_duration_class(str(payload["appt_dt"]), effective_end, split_hour)
+    return payload
+
+
+def _validate_mandatory_appointment_constraints(
+    conn: sqlite3.Connection,
+    appt_dt: str,
+    appt_end_dt: str,
+    min_travel_buffer_minutes: int,
+    exclude_appointment_id: int | None = None,
+) -> str | None:
+    appt_date = _parse_iso_datetime(appt_dt).date().isoformat()
+    rows = conn.execute(
+        """
+        SELECT id, appt_dt, appt_end_dt
+        FROM appointments
+        WHERE planning_disposition = 'mandatory'
+          AND date(appt_dt) = date(?)
+        ORDER BY appt_dt ASC
+        """,
+        (appt_date,),
+    ).fetchall()
+
+    windows: list[tuple[int, datetime_type, datetime_type]] = []
+    for row in rows:
+        existing_id = int(row["id"])
+        if exclude_appointment_id is not None and existing_id == exclude_appointment_id:
+            continue
+        start = _parse_iso_datetime(row["appt_dt"])
+        end = _parse_iso_datetime(row["appt_end_dt"])
+        windows.append((existing_id, start, end))
+
+    candidate_start = _parse_iso_datetime(appt_dt)
+    candidate_end = _parse_iso_datetime(appt_end_dt)
+
+    for _existing_id, existing_start, existing_end in windows:
+        if candidate_start < existing_end and existing_start < candidate_end:
+            return "mandatory appointments must not overlap"
+
+    combined: list[tuple[int, datetime_type, datetime_type]] = [(-1, candidate_start, candidate_end), *windows]
+    combined.sort(key=lambda window: window[1])
+
+    for previous, current in zip(combined, combined[1:]):
+        previous_end = previous[2]
+        current_start = current[1]
+        gap_minutes = (current_start - previous_end).total_seconds() / 60.0
+        if gap_minutes < min_travel_buffer_minutes:
+            return f"mandatory appointments require at least {min_travel_buffer_minutes} minutes between appointments"
 
     return None
 
@@ -265,18 +377,195 @@ def _column_names(conn: sqlite3.Connection, table_name: str) -> set[str]:
     return {row[1] for row in rows}
 
 
+def _activities_activity_type_constraint_allows_hiking(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'activities'"
+    ).fetchone()
+    if row is None:
+        return True
+
+    create_sql = str(row["sql"] or "").lower()
+    if "activity_type" not in create_sql:
+        return True
+    if "check" not in create_sql:
+        return True
+    if "activity_type is null or activity_type in" not in create_sql:
+        return True
+    return "'hiking'" in create_sql
+
+
+def _upgrade_activities_activity_type_constraint(conn: sqlite3.Connection) -> None:
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute(
+            """
+            CREATE TABLE activities_new (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                title               TEXT NOT NULL,
+                description         TEXT,
+                location            TEXT,
+                category            TEXT,
+                activity_type       TEXT CHECK (activity_type IS NULL OR activity_type IN ('eatery', 'landmark', 'hiking', 'geocache', 'errand', 'cozy_task', 'scout')),
+                city                TEXT,
+                location_detail     TEXT,
+                is_evergreen        INTEGER NOT NULL DEFAULT 1 CHECK (is_evergreen IN (0, 1)),
+                status              TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'retired')),
+                weather_sensitive   INTEGER DEFAULT 0,
+                physical_intensity  INTEGER DEFAULT 1,
+                repeatability_factor REAL DEFAULT 2,
+                day_of_week_mask    INTEGER
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO activities_new (
+                id, title, description, location, category, activity_type, city,
+                location_detail, is_evergreen, status, weather_sensitive,
+                physical_intensity, repeatability_factor, day_of_week_mask
+            )
+            SELECT
+                id, title, description, location, category, activity_type, city,
+                location_detail, is_evergreen, status, weather_sensitive,
+                physical_intensity, repeatability_factor, day_of_week_mask
+            FROM activities
+            """
+        )
+        conn.execute("DROP TABLE activities")
+        conn.execute("ALTER TABLE activities_new RENAME TO activities")
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+
+
 def _migrate_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS activity_urls (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            activity_id INTEGER NOT NULL REFERENCES activities(id) ON DELETE CASCADE,
+            url         TEXT NOT NULL,
+            label       TEXT,
+            created_at  TEXT DEFAULT (datetime('now'))
+        )
+        """
+    )
+
     appointment_columns = _column_names(conn, "appointments")
     if "appt_end_dt" not in appointment_columns:
         conn.execute("ALTER TABLE appointments ADD COLUMN appt_end_dt TEXT")
+    if "planning_disposition" not in appointment_columns:
+        conn.execute("ALTER TABLE appointments ADD COLUMN planning_disposition TEXT NOT NULL DEFAULT 'optional'")
 
     activity_columns = _column_names(conn, "activities")
     if "repeatability_factor" not in activity_columns:
         conn.execute("ALTER TABLE activities ADD COLUMN repeatability_factor REAL DEFAULT 2")
     if "day_of_week_mask" not in activity_columns:
         conn.execute("ALTER TABLE activities ADD COLUMN day_of_week_mask INTEGER")
+    if "activity_type" not in activity_columns:
+        conn.execute("ALTER TABLE activities ADD COLUMN activity_type TEXT")
+    if "city" not in activity_columns:
+        conn.execute("ALTER TABLE activities ADD COLUMN city TEXT")
+    if "location_detail" not in activity_columns:
+        conn.execute("ALTER TABLE activities ADD COLUMN location_detail TEXT")
+    if "is_evergreen" not in activity_columns:
+        conn.execute("ALTER TABLE activities ADD COLUMN is_evergreen INTEGER NOT NULL DEFAULT 1")
+    if "status" not in activity_columns:
+        conn.execute("ALTER TABLE activities ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
+
+    if not _activities_activity_type_constraint_allows_hiking(conn):
+        _upgrade_activities_activity_type_constraint(conn)
 
     conn.execute("UPDATE activities SET repeatability_factor = 2 WHERE repeatability_factor IS NULL")
+    conn.execute("UPDATE appointments SET planning_disposition = 'optional' WHERE planning_disposition IS NULL OR trim(planning_disposition) = ''")
+    conn.execute("UPDATE activities SET is_evergreen = 1 WHERE is_evergreen IS NULL")
+    conn.execute("UPDATE activities SET status = 'active' WHERE status IS NULL OR trim(status) = ''")
+    conn.execute(
+        """
+        UPDATE activities
+        SET city = trim(substr(coalesce(location, ''), 1, instr(coalesce(location, '') || ',', ',') - 1))
+        WHERE city IS NULL AND location IS NOT NULL
+        """
+    )
+    conn.execute("UPDATE activities SET location_detail = location WHERE location_detail IS NULL AND location IS NOT NULL")
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS templates (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT NOT NULL,
+            description TEXT,
+            status      TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+            created_at  TEXT DEFAULT (datetime('now'))
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS anchors (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            name            TEXT NOT NULL,
+            city            TEXT NOT NULL,
+            location_detail TEXT,
+            duration        TEXT NOT NULL CHECK (duration IN ('half_day', 'full_day')),
+            template_id     INTEGER NOT NULL REFERENCES templates(id),
+            status          TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+            created_at      TEXT DEFAULT (datetime('now'))
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS template_slots (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            template_id        INTEGER NOT NULL REFERENCES templates(id) ON DELETE CASCADE,
+            slot_order         INTEGER NOT NULL,
+            slot_type          TEXT NOT NULL CHECK (slot_type IN ('eatery', 'landmark', 'geocache', 'errand', 'cozy_task', 'scout')),
+            required           INTEGER NOT NULL DEFAULT 0 CHECK (required IN (0, 1)),
+            location_scope     TEXT NOT NULL DEFAULT 'anchor_city' CHECK (location_scope IN ('anchor_city', 'anywhere', 'exact_location')),
+            fallback_slot_type TEXT CHECK (fallback_slot_type IS NULL OR fallback_slot_type IN ('eatery', 'landmark', 'geocache', 'errand', 'cozy_task', 'scout')),
+            created_at         TEXT DEFAULT (datetime('now')),
+            UNIQUE (template_id, slot_order)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS daily_plans (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            plan_date     TEXT NOT NULL UNIQUE,
+            plan_state    TEXT NOT NULL DEFAULT 'active' CHECK (plan_state IN ('draft', 'active', 'checked_in')),
+            anchor_source TEXT NOT NULL CHECK (anchor_source IN ('user_anchor', 'mandatory_appointment', 'multi_mandatory_appointments')),
+            anchor_ref_id INTEGER,
+            created_at    TEXT DEFAULT (datetime('now')),
+            updated_at    TEXT DEFAULT (datetime('now'))
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS daily_plan_items (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            daily_plan_id    INTEGER NOT NULL REFERENCES daily_plans(id) ON DELETE CASCADE,
+            slot_type        TEXT NOT NULL CHECK (slot_type IN ('eatery', 'landmark', 'geocache', 'errand', 'cozy_task', 'scout', 'appointment', 'anchor')),
+            activity_id      INTEGER REFERENCES activities(id),
+            status           TEXT NOT NULL DEFAULT 'planned' CHECK (status IN ('planned', 'done', 'skipped', 'canceled')),
+            completion_notes TEXT,
+            was_fallback     INTEGER NOT NULL DEFAULT 0 CHECK (was_fallback IN (0, 1)),
+            source_type      TEXT NOT NULL DEFAULT 'template_slot' CHECK (source_type IN ('template_slot', 'appointment', 'anchor')),
+            source_ref_id    INTEGER,
+            created_at       TEXT DEFAULT (datetime('now'))
+        )
+        """
+    )
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_appointments_date ON appointments(date(appt_dt))")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_appointments_disposition_date ON appointments(planning_disposition, date(appt_dt))")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_activities_type_status_city ON activities(activity_type, status, city)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_templates_status ON templates(status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_anchors_status_city ON anchors(status, city)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_plans_date ON daily_plans(plan_date)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_plan_items_plan ON daily_plan_items(daily_plan_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_daily_plan_items_activity ON daily_plan_items(activity_id)")
     conn.commit()
 
 
@@ -313,6 +602,16 @@ def _hydrate_activities(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> li
     for activity in activities:
         activity["urls"] = urls_by_id.get(activity["id"], [])
         activity["available_days"] = _mask_to_available_days(activity.get("day_of_week_mask"))
+        if activity.get("activity_type") is None:
+            activity["activity_type"] = _activity_planner_type(activity)
+        if activity.get("city") is None:
+            activity["city"] = _activity_city(activity)
+        if activity.get("location_detail") is None:
+            activity["location_detail"] = activity.get("location")
+        if activity.get("is_evergreen") is None:
+            activity["is_evergreen"] = 1
+        if activity.get("status") is None:
+            activity["status"] = "active"
     return activities
 
 
@@ -540,7 +839,7 @@ def _replace_activity_urls(conn: sqlite3.Connection, activity_id: int, urls: lis
 def _get_activity(conn: sqlite3.Connection, activity_id: int) -> dict[str, Any] | None:
     row = conn.execute(
         """
-        SELECT id, title, description, location, category, weather_sensitive, physical_intensity, repeatability_factor, day_of_week_mask
+        SELECT id, title, description, location, category, activity_type, city, location_detail, is_evergreen, status, weather_sensitive, physical_intensity, repeatability_factor, day_of_week_mask
         FROM activities
         WHERE id = ?
         """,
@@ -555,7 +854,7 @@ def _get_activity(conn: sqlite3.Connection, activity_id: int) -> dict[str, Any] 
 def _get_appointment(conn: sqlite3.Connection, appointment_id: int) -> dict[str, Any] | None:
     row = conn.execute(
         """
-        SELECT id, title, location, appt_dt, appt_end_dt, notes
+        SELECT id, title, location, appt_dt, appt_end_dt, planning_disposition, notes
         FROM appointments
         WHERE id = ?
         """,
@@ -564,7 +863,290 @@ def _get_appointment(conn: sqlite3.Connection, appointment_id: int) -> dict[str,
     if row is None:
         return None
 
+    return _appointment_payload(row)
+
+
+def _get_template(conn: sqlite3.Connection, template_id: int) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT id, name, description, status, created_at
+        FROM templates
+        WHERE id = ?
+        """,
+        (template_id,),
+    ).fetchone()
+    if row is None:
+        return None
+
+    template = dict(row)
+    template["slots"] = _template_slots_for_template(conn, template["id"])
+    return template
+
+
+def _template_slots_for_template(conn: sqlite3.Connection, template_id: int) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT id, template_id, slot_order, slot_type, required, location_scope, fallback_slot_type, created_at
+        FROM template_slots
+        WHERE template_id = ?
+        ORDER BY slot_order ASC, id ASC
+        """,
+        (template_id,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _get_anchor(conn: sqlite3.Connection, anchor_id: int) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT id, name, city, location_detail, duration, template_id, status, created_at
+        FROM anchors
+        WHERE id = ?
+        """,
+        (anchor_id,),
+    ).fetchone()
+    if row is None:
+        return None
+
+    anchor = dict(row)
+    template = _get_template(conn, anchor["template_id"])
+    anchor["template"] = template
+    return anchor
+
+
+def _get_template_slot(conn: sqlite3.Connection, slot_id: int) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT id, template_id, slot_order, slot_type, required, location_scope, fallback_slot_type, created_at
+        FROM template_slots
+        WHERE id = ?
+        """,
+        (slot_id,),
+    ).fetchone()
+    if row is None:
+        return None
     return dict(row)
+
+
+def _get_daily_plan(conn: sqlite3.Connection, plan_date: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT id, plan_date, plan_state, anchor_source, anchor_ref_id, created_at, updated_at
+        FROM daily_plans
+        WHERE plan_date = ?
+        """,
+        (plan_date,),
+    ).fetchone()
+    if row is None:
+        return None
+
+    plan = dict(row)
+    items = conn.execute(
+        """
+        SELECT id, daily_plan_id, slot_type, activity_id, status, completion_notes, was_fallback, source_type, source_ref_id, created_at
+        FROM daily_plan_items
+        WHERE daily_plan_id = ?
+        ORDER BY id ASC
+        """,
+        (plan["id"],),
+    ).fetchall()
+    plan["items"] = [_daily_plan_item_payload(conn, item) for item in items]
+
+    if plan["anchor_source"] == "user_anchor" and plan["anchor_ref_id"] is not None:
+        plan["anchor"] = _get_anchor(conn, int(plan["anchor_ref_id"]))
+    elif plan["anchor_source"] in {"mandatory_appointment", "multi_mandatory_appointments"}:
+        plan["appointments"] = _mandatory_appointments_for_date(conn, plan_date)
+
+    return plan
+
+
+def _mandatory_appointments_for_date(conn: sqlite3.Connection, plan_date: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT id, title, location, appt_dt, appt_end_dt, planning_disposition, notes
+        FROM appointments
+        WHERE planning_disposition = 'mandatory'
+          AND date(appt_dt) = date(?)
+        ORDER BY appt_dt ASC, id ASC
+        """,
+        (plan_date,),
+    ).fetchall()
+    return [_appointment_payload(row) for row in rows]
+
+
+def _active_anchor_rows(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT a.id, a.name, a.city, a.location_detail, a.duration, a.template_id, a.status, a.created_at, t.name AS template_name
+        FROM anchors a
+        JOIN templates t ON t.id = a.template_id
+        WHERE a.status = 'active' AND t.status = 'active'
+        ORDER BY a.name COLLATE NOCASE ASC, a.id ASC
+        """
+    ).fetchall()
+
+
+def _anchor_option_payload(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+    anchor = dict(row)
+    anchor["template"] = _get_template(conn, anchor["template_id"])
+    return anchor
+
+
+def _replace_daily_plan(conn: sqlite3.Connection, plan_date: str) -> None:
+    existing = conn.execute("SELECT id FROM daily_plans WHERE plan_date = ?", (plan_date,)).fetchone()
+    if existing is None:
+        return
+    conn.execute("DELETE FROM daily_plans WHERE id = ?", (existing["id"],))
+
+
+def _daily_plan_item_payload(conn: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+    item = dict(row)
+    if item.get("activity_id") is not None:
+        item["activity"] = _get_activity(conn, int(item["activity_id"]))
+    return item
+
+
+def _activity_city(activity: dict[str, Any]) -> str | None:
+    city = activity.get("city")
+    if isinstance(city, str) and city.strip():
+        return city.strip().lower()
+    return _city_token(activity.get("location"))
+
+
+def _activity_text(activity: dict[str, Any]) -> str:
+    parts = [activity.get("title"), activity.get("description"), activity.get("category"), activity.get("location")]
+    return " ".join(str(part) for part in parts if isinstance(part, str) and part.strip()).lower()
+
+
+def _activity_planner_type(activity: dict[str, Any]) -> str | None:
+    activity_type = activity.get("activity_type")
+    if isinstance(activity_type, str) and activity_type.strip():
+        normalized = activity_type.strip().lower()
+        if normalized in {"eatery", "landmark", "hiking", "geocache", "errand", "cozy_task", "scout"}:
+            return normalized
+
+    category = str(activity.get("category") or "").strip().lower()
+    text = _activity_text(activity)
+
+    category_aliases = {
+        "eatery": {"eatery", "coffee", "cafe", "restaurant", "bakery", "diner", "food", "lunch", "breakfast"},
+        "landmark": {"landmark", "museum", "park", "viewpoint", "historic", "neighborhood"},
+        "hiking": {"hiking", "nature trail", "trail", "hike"},
+        "geocache": {"geocache", "cache"},
+        "errand": {"errand", "shopping", "store", "retail", "pharmacy", "grocery", "hardware", "pickup"},
+        "cozy_task": {"cozy", "home", "indoor", "reading", "movie", "craft", "relax", "chores"},
+        "scout": {"scout", "explore", "discovery", "new", "adventure"},
+    }
+
+    for planner_type, aliases in category_aliases.items():
+        if category in aliases:
+            return planner_type
+        if any(alias in text for alias in aliases):
+            return planner_type
+
+    return None
+
+
+def _activity_matches_location_scope(activity: dict[str, Any], anchor_city: str, location_scope: str) -> bool:
+    if location_scope == "anywhere":
+        return True
+
+    activity_city = _activity_city(activity)
+    if location_scope == "anchor_city":
+        return activity_city == anchor_city
+
+    if location_scope == "exact_location":
+        location = activity.get("location_detail") or activity.get("location")
+        if isinstance(location, str) and location.strip():
+            return location.strip().lower() == anchor_city or anchor_city in location.strip().lower()
+        return False
+
+    return False
+
+
+def _activity_matches_slot(activity: dict[str, Any], slot_type: str, anchor_city: str, location_scope: str) -> bool:
+    if str(activity.get("status") or "active").strip().lower() != "active":
+        return False
+
+    activity_type = activity.get("activity_type")
+    if not isinstance(activity_type, str) or not activity_type.strip():
+        return False
+
+    normalized_type = activity_type.strip().lower()
+    if normalized_type != slot_type:
+        return False
+
+    return _activity_matches_location_scope(activity, anchor_city, location_scope)
+
+
+def _eligible_activities_for_slot(conn: sqlite3.Connection, slot: dict[str, Any], anchor_city: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT id, title, description, location, category, activity_type, city, location_detail, is_evergreen, status, weather_sensitive, physical_intensity, repeatability_factor, day_of_week_mask
+        FROM activities
+        WHERE status = 'active'
+        ORDER BY id ASC
+        """
+    ).fetchall()
+
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        activity = dict(row)
+        if activity.get("location_detail") is None:
+            activity["location_detail"] = activity.get("location")
+        if _activity_matches_slot(activity, slot["slot_type"], anchor_city, slot["location_scope"]):
+            candidates.append(activity)
+
+    return candidates
+
+
+def _pick_activity_for_slot(conn: sqlite3.Connection, slot: dict[str, Any], anchor_city: str) -> tuple[dict[str, Any] | None, bool]:
+    candidates = _eligible_activities_for_slot(conn, slot, anchor_city)
+    if candidates:
+        return candidates[0], False
+
+    fallback_type = slot.get("fallback_slot_type")
+    if isinstance(fallback_type, str) and fallback_type.strip():
+        fallback_slot = dict(slot)
+        fallback_slot["slot_type"] = fallback_type.strip().lower()
+        fallback_candidates = _eligible_activities_for_slot(conn, fallback_slot, anchor_city)
+        if fallback_candidates:
+            return fallback_candidates[0], True
+
+    return None, False
+
+
+def _build_daily_plan_items_for_anchor(conn: sqlite3.Connection, daily_plan_id: int, anchor: dict[str, Any]) -> None:
+    template = anchor.get("template") or {}
+    slots = template.get("slots") or []
+    anchor_city = str(anchor.get("city") or "").strip().lower()
+
+    if not slots:
+        conn.execute(
+            """
+            INSERT INTO daily_plan_items (daily_plan_id, slot_type, activity_id, status, completion_notes, was_fallback, source_type, source_ref_id)
+            VALUES (?, 'anchor', NULL, 'planned', NULL, 0, 'anchor', ?)
+            """,
+            (daily_plan_id, anchor["id"]),
+        )
+        return
+
+    for slot in slots:
+        activity, was_fallback = _pick_activity_for_slot(conn, slot, anchor_city)
+        completion_notes = None
+        if activity is None:
+            if int(slot.get("required") or 0) == 1:
+                completion_notes = f"No eligible activity found for required slot {slot['slot_type']}"
+            else:
+                completion_notes = f"No eligible activity found for optional slot {slot['slot_type']}"
+
+        conn.execute(
+            """
+            INSERT INTO daily_plan_items (daily_plan_id, slot_type, activity_id, status, completion_notes, was_fallback, source_type, source_ref_id)
+            VALUES (?, ?, ?, 'planned', ?, ?, 'template_slot', ?)
+            """,
+            (daily_plan_id, slot["slot_type"], activity["id"] if activity is not None else None, completion_notes, 1 if was_fallback else 0, slot["id"]),
+        )
 
 
 def _get_timed_event(conn: sqlite3.Connection, timed_event_id: int) -> dict[str, Any] | None:
@@ -605,7 +1187,7 @@ def _find_activity_row(
     if activity_id is not None:
         row = conn.execute(
             """
-            SELECT id, title, description, location, category, weather_sensitive, physical_intensity, repeatability_factor, day_of_week_mask
+            SELECT id, title, description, location, category, activity_type, city, location_detail, is_evergreen, status, weather_sensitive, physical_intensity, repeatability_factor, day_of_week_mask
             FROM activities
             WHERE id = ?
             """,
@@ -619,7 +1201,7 @@ def _find_activity_row(
     normalized_title = title.strip()
     exact_matches = conn.execute(
         """
-        SELECT id, title, description, location, category, weather_sensitive, physical_intensity, repeatability_factor, day_of_week_mask
+        SELECT id, title, description, location, category, activity_type, city, location_detail, is_evergreen, status, weather_sensitive, physical_intensity, repeatability_factor, day_of_week_mask
         FROM activities
         WHERE lower(title) = lower(?)
         ORDER BY title COLLATE NOCASE ASC
@@ -634,7 +1216,7 @@ def _find_activity_row(
     search_term = f"%{normalized_title}%"
     partial_matches = conn.execute(
         """
-        SELECT id, title, description, location, category, weather_sensitive, physical_intensity, repeatability_factor, day_of_week_mask
+        SELECT id, title, description, location, category, activity_type, city, location_detail, is_evergreen, status, weather_sensitive, physical_intensity, repeatability_factor, day_of_week_mask
         FROM activities
         WHERE lower(title) LIKE lower(?)
         ORDER BY title COLLATE NOCASE ASC
@@ -819,7 +1401,7 @@ def get_daily_briefing(
 
     appointments = conn.execute(
         """
-        SELECT id, title, location, appt_dt, appt_end_dt, notes
+        SELECT id, title, location, appt_dt, appt_end_dt, planning_disposition, notes
         FROM appointments
         WHERE date(appt_dt) IN (date(?), date(?, '+1 day'))
         ORDER BY appt_dt ASC
@@ -899,7 +1481,7 @@ def get_daily_briefing(
         "rain_chance": effective_rain_chance,
         "readiness": readiness,
         "weather": weather,
-        "appointments": [dict(row) for row in appointments],
+        "appointments": [_appointment_payload(row, settings=settings) for row in appointments],
         "active_timed_events": [dict(row) for row in timed_events],
         "annual_reminders": annual_reminders,
         "activity_suggestions": activity_suggestions,
@@ -931,6 +1513,7 @@ def add_appointment(
     title: str,
     appt_dt: str,
     appt_end_dt: str = "",
+    planning_disposition: str = "optional",
     location: str = "",
     notes: str = "",
 ) -> dict[str, Any]:
@@ -940,18 +1523,40 @@ def add_appointment(
     if not trimmed_title:
         return {"ok": False, "error": "title cannot be empty"}
 
-    normalized_end = appt_end_dt.strip() or None
+    settings = _load_settings()
+    planner = _planner_settings(settings)
+
+    normalized_disposition, disposition_error = _normalized_planning_disposition(planning_disposition)
+    if disposition_error:
+        return {"ok": False, "error": disposition_error}
+
+    normalized_end = _effective_appointment_end(
+        appt_dt=appt_dt,
+        appt_end_dt=appt_end_dt.strip() or None,
+        default_duration_minutes=planner["default_appointment_duration_minutes"],
+    )
     datetime_error = _validate_appointment_datetimes(appt_dt, normalized_end)
     if datetime_error:
         return {"ok": False, "error": datetime_error}
 
     conn = _connect()
+    if normalized_disposition == "mandatory":
+        mandatory_error = _validate_mandatory_appointment_constraints(
+            conn=conn,
+            appt_dt=appt_dt,
+            appt_end_dt=normalized_end,
+            min_travel_buffer_minutes=planner["min_travel_buffer_minutes"],
+        )
+        if mandatory_error:
+            conn.close()
+            return {"ok": False, "error": mandatory_error}
+
     cursor = conn.execute(
         """
-        INSERT INTO appointments (title, location, appt_dt, appt_end_dt, notes)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO appointments (title, location, appt_dt, appt_end_dt, planning_disposition, notes)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (trimmed_title, location.strip() or None, appt_dt, normalized_end, notes.strip() or None),
+        (trimmed_title, location.strip() or None, appt_dt, normalized_end, normalized_disposition, notes.strip() or None),
     )
     appointment_id = cursor.lastrowid
     if appointment_id is None:
@@ -983,11 +1588,12 @@ def list_appointments(start_date: str | None = None, end_date: str | None = None
         if end_date < start:
             return {"ok": False, "error": "end_date must be on or after start_date"}
 
+    settings = _load_settings()
     conn = _connect()
     if end_date is None:
         rows = conn.execute(
             """
-            SELECT id, title, location, appt_dt, appt_end_dt, notes
+            SELECT id, title, location, appt_dt, appt_end_dt, planning_disposition, notes
             FROM appointments
             WHERE date(appt_dt) = date(?)
             ORDER BY appt_dt ASC
@@ -997,7 +1603,7 @@ def list_appointments(start_date: str | None = None, end_date: str | None = None
     else:
         rows = conn.execute(
             """
-            SELECT id, title, location, appt_dt, appt_end_dt, notes
+            SELECT id, title, location, appt_dt, appt_end_dt, planning_disposition, notes
             FROM appointments
             WHERE date(appt_dt) BETWEEN date(?) AND date(?)
             ORDER BY appt_dt ASC
@@ -1010,7 +1616,7 @@ def list_appointments(start_date: str | None = None, end_date: str | None = None
         "ok": True,
         "start_date": start,
         "end_date": end_date or start,
-        "appointments": [dict(row) for row in rows],
+        "appointments": [_appointment_payload(row, settings=settings) for row in rows],
     }
 
 
@@ -1020,6 +1626,7 @@ def update_appointment(
     title: str | None = None,
     appt_dt: str | None = None,
     appt_end_dt: str | None = None,
+    planning_disposition: str | None = None,
     location: str | None = None,
     notes: str | None = None,
 ) -> dict[str, Any]:
@@ -1031,6 +1638,9 @@ def update_appointment(
         conn.close()
         return {"ok": False, "error": f"Appointment {appointment_id} not found"}
 
+    settings = _load_settings()
+    planner = _planner_settings(settings)
+
     updates: dict[str, Any] = {}
     if title is not None:
         trimmed_title = title.strip()
@@ -1040,7 +1650,8 @@ def update_appointment(
         updates["title"] = trimmed_title
 
     effective_appt_dt = appt_dt if appt_dt is not None else str(existing["appt_dt"])
-    effective_appt_end_dt = existing["appt_end_dt"]
+    effective_appt_end_dt = str(existing["appt_end_dt"])
+    effective_disposition = str(existing.get("planning_disposition") or "optional")
 
     if appt_dt is not None:
         updates["appt_dt"] = appt_dt
@@ -1049,10 +1660,37 @@ def update_appointment(
         effective_appt_end_dt = appt_end_dt.strip() or None
         updates["appt_end_dt"] = effective_appt_end_dt
 
+    if planning_disposition is not None:
+        normalized_disposition, disposition_error = _normalized_planning_disposition(planning_disposition)
+        if disposition_error:
+            conn.close()
+            return {"ok": False, "error": disposition_error}
+        effective_disposition = str(normalized_disposition)
+        updates["planning_disposition"] = effective_disposition
+
+    effective_appt_end_dt = _effective_appointment_end(
+        appt_dt=effective_appt_dt,
+        appt_end_dt=effective_appt_end_dt,
+        default_duration_minutes=planner["default_appointment_duration_minutes"],
+    )
+    updates["appt_end_dt"] = effective_appt_end_dt
+
     datetime_error = _validate_appointment_datetimes(effective_appt_dt, effective_appt_end_dt)
     if datetime_error:
         conn.close()
         return {"ok": False, "error": datetime_error}
+
+    if effective_disposition == "mandatory":
+        mandatory_error = _validate_mandatory_appointment_constraints(
+            conn=conn,
+            appt_dt=effective_appt_dt,
+            appt_end_dt=effective_appt_end_dt,
+            min_travel_buffer_minutes=planner["min_travel_buffer_minutes"],
+            exclude_appointment_id=appointment_id,
+        )
+        if mandatory_error:
+            conn.close()
+            return {"ok": False, "error": mandatory_error}
 
     if location is not None:
         updates["location"] = location.strip() or None
@@ -1091,6 +1729,643 @@ def delete_appointment(appointment_id: int) -> dict[str, Any]:
     conn.close()
 
     return {"ok": True, "deleted_appointment": existing}
+
+
+def _normalized_enum_value(value: str | None, allowed: set[str], default: str | None = None) -> tuple[str | None, str | None]:
+    if value is None:
+        return default, None
+
+    normalized = value.strip().lower()
+    if normalized not in allowed:
+        return None, f"value must be one of: {', '.join(sorted(allowed))}"
+    return normalized, None
+
+
+@mcp.tool()
+def add_template(name: str, description: str = "", status: str = "active") -> dict[str, Any]:
+    """Add a planner template."""
+
+    trimmed_name = name.strip()
+    if not trimmed_name:
+        return {"ok": False, "error": "name cannot be empty"}
+
+    normalized_status, status_error = _normalized_enum_value(status, {"active", "inactive"}, default="active")
+    if status_error:
+        return {"ok": False, "error": status_error}
+
+    conn = _connect()
+    cursor = conn.execute(
+        """
+        INSERT INTO templates (name, description, status)
+        VALUES (?, ?, ?)
+        """,
+        (trimmed_name, description.strip() or None, normalized_status),
+    )
+    template_id = cursor.lastrowid
+    conn.commit()
+    template = _get_template(conn, int(template_id)) if template_id is not None else None
+    conn.close()
+
+    if template is None:
+        return {"ok": False, "error": "Failed to create template"}
+    return {"ok": True, "id": template_id, "template": template}
+
+
+@mcp.tool()
+def list_templates(status: str | None = None) -> dict[str, Any]:
+    """List planner templates."""
+
+    normalized_status, status_error = _normalized_enum_value(status, {"active", "inactive"})
+    if status_error:
+        return {"ok": False, "error": status_error}
+
+    conn = _connect()
+    if normalized_status is None:
+        rows = conn.execute(
+            """
+            SELECT id, name, description, status, created_at
+            FROM templates
+            ORDER BY name COLLATE NOCASE ASC, id ASC
+            """
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT id, name, description, status, created_at
+            FROM templates
+            WHERE status = ?
+            ORDER BY name COLLATE NOCASE ASC, id ASC
+            """,
+            (normalized_status,),
+        ).fetchall()
+
+    templates = []
+    for row in rows:
+        template = dict(row)
+        template["slots"] = _template_slots_for_template(conn, template["id"])
+        templates.append(template)
+    conn.close()
+
+    return {"ok": True, "status": normalized_status, "templates": templates}
+
+
+@mcp.tool()
+def update_template(
+    template_id: int,
+    name: str | None = None,
+    description: str | None = None,
+    status: str | None = None,
+) -> dict[str, Any]:
+    """Update a planner template."""
+
+    conn = _connect()
+    existing = _get_template(conn, template_id)
+    if existing is None:
+        conn.close()
+        return {"ok": False, "error": f"Template {template_id} not found"}
+
+    updates: dict[str, Any] = {}
+    if name is not None:
+        trimmed_name = name.strip()
+        if not trimmed_name:
+            conn.close()
+            return {"ok": False, "error": "name cannot be empty"}
+        updates["name"] = trimmed_name
+
+    if description is not None:
+        updates["description"] = description.strip() or None
+
+    if status is not None:
+        normalized_status, status_error = _normalized_enum_value(status, {"active", "inactive"})
+        if status_error:
+            conn.close()
+            return {"ok": False, "error": status_error}
+        updates["status"] = normalized_status
+
+    if not updates:
+        conn.close()
+        return {"ok": False, "error": "No fields provided to update"}
+
+    assignments = ", ".join(f"{column} = ?" for column in updates)
+    conn.execute(
+        f"UPDATE templates SET {assignments} WHERE id = ?",
+        (*updates.values(), template_id),
+    )
+    conn.commit()
+    template = _get_template(conn, template_id)
+    conn.close()
+    return {"ok": True, "template": template}
+
+
+@mcp.tool()
+def delete_template(template_id: int) -> dict[str, Any]:
+    """Delete a planner template."""
+
+    conn = _connect()
+    existing = _get_template(conn, template_id)
+    if existing is None:
+        conn.close()
+        return {"ok": False, "error": f"Template {template_id} not found"}
+
+    in_use = conn.execute("SELECT 1 FROM anchors WHERE template_id = ? LIMIT 1", (template_id,)).fetchone()
+    if in_use is not None:
+        conn.close()
+        return {"ok": False, "error": f"Template {template_id} is in use by anchors"}
+
+    conn.execute("DELETE FROM template_slots WHERE template_id = ?", (template_id,))
+    conn.execute("DELETE FROM templates WHERE id = ?", (template_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "deleted_template": existing}
+
+
+@mcp.tool()
+def add_anchor(
+    name: str,
+    city: str,
+    template_id: int,
+    duration: str = "half_day",
+    location_detail: str = "",
+    status: str = "active",
+) -> dict[str, Any]:
+    """Add a planner anchor."""
+
+    trimmed_name = name.strip()
+    trimmed_city = city.strip()
+    if not trimmed_name:
+        return {"ok": False, "error": "name cannot be empty"}
+    if not trimmed_city:
+        return {"ok": False, "error": "city cannot be empty"}
+
+    normalized_duration, duration_error = _normalized_enum_value(duration, {"half_day", "full_day"}, default="half_day")
+    if duration_error:
+        return {"ok": False, "error": duration_error}
+
+    normalized_status, status_error = _normalized_enum_value(status, {"active", "inactive"}, default="active")
+    if status_error:
+        return {"ok": False, "error": status_error}
+
+    conn = _connect()
+    template = _get_template(conn, template_id)
+    if template is None:
+        conn.close()
+        return {"ok": False, "error": f"Template {template_id} not found"}
+
+    cursor = conn.execute(
+        """
+        INSERT INTO anchors (name, city, location_detail, duration, template_id, status)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (trimmed_name, trimmed_city, location_detail.strip() or None, normalized_duration, template_id, normalized_status),
+    )
+    anchor_id = cursor.lastrowid
+    conn.commit()
+    anchor = _get_anchor(conn, int(anchor_id)) if anchor_id is not None else None
+    conn.close()
+
+    if anchor is None:
+        return {"ok": False, "error": "Failed to create anchor"}
+    return {"ok": True, "id": anchor_id, "anchor": anchor}
+
+
+@mcp.tool()
+def list_anchors(status: str | None = None) -> dict[str, Any]:
+    """List planner anchors."""
+
+    normalized_status, status_error = _normalized_enum_value(status, {"active", "inactive"})
+    if status_error:
+        return {"ok": False, "error": status_error}
+
+    conn = _connect()
+    if normalized_status is None:
+        rows = conn.execute(
+            """
+            SELECT a.id, a.name, a.city, a.location_detail, a.duration, a.template_id, a.status, a.created_at, t.name AS template_name
+            FROM anchors a
+            JOIN templates t ON t.id = a.template_id
+            ORDER BY a.name COLLATE NOCASE ASC, a.id ASC
+            """
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT a.id, a.name, a.city, a.location_detail, a.duration, a.template_id, a.status, a.created_at, t.name AS template_name
+            FROM anchors a
+            JOIN templates t ON t.id = a.template_id
+            WHERE a.status = ?
+            ORDER BY a.name COLLATE NOCASE ASC, a.id ASC
+            """,
+            (normalized_status,),
+        ).fetchall()
+
+    anchors = []
+    for row in rows:
+        anchor = dict(row)
+        anchor["template"] = _get_template(conn, anchor["template_id"])
+        anchors.append(anchor)
+    conn.close()
+    return {"ok": True, "status": normalized_status, "anchors": anchors}
+
+
+@mcp.tool()
+def update_anchor(
+    anchor_id: int,
+    name: str | None = None,
+    city: str | None = None,
+    template_id: int | None = None,
+    duration: str | None = None,
+    location_detail: str | None = None,
+    status: str | None = None,
+) -> dict[str, Any]:
+    """Update a planner anchor."""
+
+    conn = _connect()
+    existing = _get_anchor(conn, anchor_id)
+    if existing is None:
+        conn.close()
+        return {"ok": False, "error": f"Anchor {anchor_id} not found"}
+
+    updates: dict[str, Any] = {}
+    if name is not None:
+        trimmed_name = name.strip()
+        if not trimmed_name:
+            conn.close()
+            return {"ok": False, "error": "name cannot be empty"}
+        updates["name"] = trimmed_name
+
+    if city is not None:
+        trimmed_city = city.strip()
+        if not trimmed_city:
+            conn.close()
+            return {"ok": False, "error": "city cannot be empty"}
+        updates["city"] = trimmed_city
+
+    if template_id is not None:
+        if _get_template(conn, template_id) is None:
+            conn.close()
+            return {"ok": False, "error": f"Template {template_id} not found"}
+        updates["template_id"] = template_id
+
+    if duration is not None:
+        normalized_duration, duration_error = _normalized_enum_value(duration, {"half_day", "full_day"})
+        if duration_error:
+            conn.close()
+            return {"ok": False, "error": duration_error}
+        updates["duration"] = normalized_duration
+
+    if location_detail is not None:
+        updates["location_detail"] = location_detail.strip() or None
+
+    if status is not None:
+        normalized_status, status_error = _normalized_enum_value(status, {"active", "inactive"})
+        if status_error:
+            conn.close()
+            return {"ok": False, "error": status_error}
+        updates["status"] = normalized_status
+
+    if not updates:
+        conn.close()
+        return {"ok": False, "error": "No fields provided to update"}
+
+    assignments = ", ".join(f"{column} = ?" for column in updates)
+    conn.execute(
+        f"UPDATE anchors SET {assignments} WHERE id = ?",
+        (*updates.values(), anchor_id),
+    )
+    conn.commit()
+    anchor = _get_anchor(conn, anchor_id)
+    conn.close()
+    return {"ok": True, "anchor": anchor}
+
+
+@mcp.tool()
+def delete_anchor(anchor_id: int) -> dict[str, Any]:
+    """Delete a planner anchor."""
+
+    conn = _connect()
+    existing = _get_anchor(conn, anchor_id)
+    if existing is None:
+        conn.close()
+        return {"ok": False, "error": f"Anchor {anchor_id} not found"}
+
+    conn.execute("DELETE FROM anchors WHERE id = ?", (anchor_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "deleted_anchor": existing}
+
+
+@mcp.tool()
+def add_template_slot(
+    template_id: int,
+    slot_order: int,
+    slot_type: str,
+    required: int = 0,
+    location_scope: str = "anchor_city",
+    fallback_slot_type: str | None = None,
+) -> dict[str, Any]:
+    """Add a slot to a planner template."""
+
+    conn = _connect()
+    if _get_template(conn, template_id) is None:
+        conn.close()
+        return {"ok": False, "error": f"Template {template_id} not found"}
+
+    normalized_slot_type, slot_type_error = _normalized_enum_value(slot_type, {"eatery", "landmark", "geocache", "errand", "cozy_task", "scout"})
+    if slot_type_error:
+        conn.close()
+        return {"ok": False, "error": slot_type_error}
+
+    normalized_scope, scope_error = _normalized_enum_value(location_scope, {"anchor_city", "anywhere", "exact_location"}, default="anchor_city")
+    if scope_error:
+        conn.close()
+        return {"ok": False, "error": scope_error}
+
+    normalized_fallback = None
+    if fallback_slot_type is not None:
+        normalized_fallback, fallback_error = _normalized_enum_value(fallback_slot_type, {"eatery", "landmark", "geocache", "errand", "cozy_task", "scout"})
+        if fallback_error:
+            conn.close()
+            return {"ok": False, "error": fallback_error}
+
+    try:
+        cursor = conn.execute(
+            """
+            INSERT INTO template_slots (template_id, slot_order, slot_type, required, location_scope, fallback_slot_type)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (template_id, slot_order, normalized_slot_type, 1 if required else 0, normalized_scope, normalized_fallback),
+        )
+    except sqlite3.IntegrityError as exc:
+        conn.close()
+        return {"ok": False, "error": str(exc)}
+
+    slot_id = cursor.lastrowid
+    conn.commit()
+    slot = _get_template_slot(conn, int(slot_id)) if slot_id is not None else None
+    conn.close()
+    return {"ok": True, "id": slot_id, "template_slot": slot}
+
+
+@mcp.tool()
+def list_template_slots(template_id: int | None = None) -> dict[str, Any]:
+    """List template slots."""
+
+    conn = _connect()
+    if template_id is None:
+        rows = conn.execute(
+            """
+            SELECT id, template_id, slot_order, slot_type, required, location_scope, fallback_slot_type, created_at
+            FROM template_slots
+            ORDER BY template_id ASC, slot_order ASC, id ASC
+            """
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT id, template_id, slot_order, slot_type, required, location_scope, fallback_slot_type, created_at
+            FROM template_slots
+            WHERE template_id = ?
+            ORDER BY slot_order ASC, id ASC
+            """,
+            (template_id,),
+        ).fetchall()
+    conn.close()
+    return {"ok": True, "template_id": template_id, "template_slots": [dict(row) for row in rows]}
+
+
+@mcp.tool()
+def update_template_slot(
+    slot_id: int,
+    slot_order: int | None = None,
+    slot_type: str | None = None,
+    required: int | None = None,
+    location_scope: str | None = None,
+    fallback_slot_type: str | None = None,
+) -> dict[str, Any]:
+    """Update a template slot."""
+
+    conn = _connect()
+    existing = _get_template_slot(conn, slot_id)
+    if existing is None:
+        conn.close()
+        return {"ok": False, "error": f"Template slot {slot_id} not found"}
+
+    updates: dict[str, Any] = {}
+    if slot_order is not None:
+        updates["slot_order"] = slot_order
+
+    if slot_type is not None:
+        normalized_slot_type, slot_type_error = _normalized_enum_value(slot_type, {"eatery", "landmark", "geocache", "errand", "cozy_task", "scout"})
+        if slot_type_error:
+            conn.close()
+            return {"ok": False, "error": slot_type_error}
+        updates["slot_type"] = normalized_slot_type
+
+    if required is not None:
+        updates["required"] = 1 if required else 0
+
+    if location_scope is not None:
+        normalized_scope, scope_error = _normalized_enum_value(location_scope, {"anchor_city", "anywhere", "exact_location"})
+        if scope_error:
+            conn.close()
+            return {"ok": False, "error": scope_error}
+        updates["location_scope"] = normalized_scope
+
+    if fallback_slot_type is not None:
+        normalized_fallback, fallback_error = _normalized_enum_value(fallback_slot_type, {"eatery", "landmark", "geocache", "errand", "cozy_task", "scout"})
+        if fallback_error:
+            conn.close()
+            return {"ok": False, "error": fallback_error}
+        updates["fallback_slot_type"] = normalized_fallback
+
+    if not updates:
+        conn.close()
+        return {"ok": False, "error": "No fields provided to update"}
+
+    assignments = ", ".join(f"{column} = ?" for column in updates)
+    try:
+        conn.execute(
+            f"UPDATE template_slots SET {assignments} WHERE id = ?",
+            (*updates.values(), slot_id),
+        )
+    except sqlite3.IntegrityError as exc:
+        conn.close()
+        return {"ok": False, "error": str(exc)}
+
+    conn.commit()
+    slot = _get_template_slot(conn, slot_id)
+    conn.close()
+    return {"ok": True, "template_slot": slot}
+
+
+@mcp.tool()
+def delete_template_slot(slot_id: int) -> dict[str, Any]:
+    """Delete a template slot."""
+
+    conn = _connect()
+    existing = _get_template_slot(conn, slot_id)
+    if existing is None:
+        conn.close()
+        return {"ok": False, "error": f"Template slot {slot_id} not found"}
+
+    conn.execute("DELETE FROM template_slots WHERE id = ?", (slot_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "deleted_template_slot": existing}
+
+
+@mcp.tool()
+def generate_anchor_options(date: str | None = None) -> dict[str, Any]:
+    """Return anchor options for a date without persisting a plan."""
+
+    target_date = _as_date(date)
+    conn = _connect()
+    mandatory_appointments = _mandatory_appointments_for_date(conn, target_date)
+
+    if len(mandatory_appointments) > 1:
+        conn.close()
+        return {
+            "ok": True,
+            "date": target_date,
+            "selection_mode": "multi_mandatory_appointments",
+            "anchor_options": [],
+            "mandatory_appointments": mandatory_appointments,
+        }
+
+    if len(mandatory_appointments) == 1:
+        conn.close()
+        return {
+            "ok": True,
+            "date": target_date,
+            "selection_mode": "mandatory_appointment",
+            "anchor_options": [],
+            "mandatory_appointments": mandatory_appointments,
+            "appointment_anchor": mandatory_appointments[0],
+        }
+
+    rows = _active_anchor_rows(conn)
+    anchor_options = [_anchor_option_payload(conn, row) for row in rows[:3]]
+    conn.close()
+
+    return {
+        "ok": True,
+        "date": target_date,
+        "selection_mode": "user_anchor",
+        "anchor_options": anchor_options,
+        "mandatory_appointments": [],
+    }
+
+
+@mcp.tool()
+def commit_daily_plan(date: str | None = None, selected_anchor_id: int | None = None) -> dict[str, Any]:
+    """Persist a daily plan for the selected anchor or mandatory appointment context."""
+
+    target_date = _as_date(date)
+    conn = _connect()
+    mandatory_appointments = _mandatory_appointments_for_date(conn, target_date)
+
+    selection_mode = "user_anchor"
+    anchor_ref_id: int | None = selected_anchor_id
+    if len(mandatory_appointments) > 1:
+        selection_mode = "multi_mandatory_appointments"
+        anchor_ref_id = None
+    elif len(mandatory_appointments) == 1:
+        selection_mode = "mandatory_appointment"
+        anchor_ref_id = int(mandatory_appointments[0]["id"])
+    else:
+        if selected_anchor_id is None:
+            conn.close()
+            return {"ok": False, "error": "selected_anchor_id is required when no mandatory appointments exist"}
+        if _get_anchor(conn, selected_anchor_id) is None:
+            conn.close()
+            return {"ok": False, "error": f"Anchor {selected_anchor_id} not found"}
+
+    try:
+        conn.execute("BEGIN")
+        _replace_daily_plan(conn, target_date)
+        cursor = conn.execute(
+            """
+            INSERT INTO daily_plans (plan_date, plan_state, anchor_source, anchor_ref_id)
+            VALUES (?, 'active', ?, ?)
+            """,
+            (target_date, selection_mode, anchor_ref_id),
+        )
+        daily_plan_id = int(cursor.lastrowid)
+
+        if selection_mode == "user_anchor":
+            anchor = _get_anchor(conn, int(selected_anchor_id)) if selected_anchor_id is not None else None
+            if anchor is None:
+                raise ValueError(f"Anchor {selected_anchor_id} not found")
+            _build_daily_plan_items_for_anchor(conn, daily_plan_id, anchor)
+        else:
+            for appointment in mandatory_appointments:
+                conn.execute(
+                    """
+                    INSERT INTO daily_plan_items (daily_plan_id, slot_type, activity_id, status, completion_notes, was_fallback, source_type, source_ref_id)
+                    VALUES (?, 'appointment', NULL, 'planned', NULL, 0, 'appointment', ?)
+                    """,
+                    (daily_plan_id, int(appointment["id"])),
+                )
+
+        conn.commit()
+    except Exception as exc:
+        conn.rollback()
+        conn.close()
+        return {"ok": False, "error": str(exc)}
+
+    plan = _get_daily_plan(conn, target_date)
+    conn.close()
+    return {"ok": True, "plan": plan}
+
+
+@mcp.tool()
+def get_daily_plan(date: str | None = None) -> dict[str, Any]:
+    """Return a persisted daily plan for a date."""
+
+    target_date = _as_date(date)
+    conn = _connect()
+    plan = _get_daily_plan(conn, target_date)
+    conn.close()
+    if plan is None:
+        return {"ok": False, "error": f"Daily plan for {target_date} not found"}
+    return {"ok": True, "plan": plan}
+
+
+@mcp.tool()
+def list_daily_plans(start_date: str | None = None, end_date: str | None = None) -> dict[str, Any]:
+    """List persisted daily plans in a date range."""
+
+    window_start = _as_date(start_date) if start_date is not None else None
+    window_end = _as_date(end_date) if end_date is not None else None
+
+    if window_start is not None and window_end is not None:
+        date_error = _validate_date_range(window_start, window_end)
+        if date_error:
+            return {"ok": False, "error": date_error}
+
+    conn = _connect()
+    sql = """
+        SELECT id, plan_date, plan_state, anchor_source, anchor_ref_id, created_at, updated_at
+        FROM daily_plans
+        WHERE 1 = 1
+    """
+    params: list[Any] = []
+    if window_start is not None:
+        sql += "\n          AND date(plan_date) >= date(?)"
+        params.append(window_start)
+    if window_end is not None:
+        sql += "\n          AND date(plan_date) <= date(?)"
+        params.append(window_end)
+
+    sql += "\n        ORDER BY plan_date ASC, id ASC"
+    rows = conn.execute(sql, params).fetchall()
+    plans = []
+    for row in rows:
+        plan = _get_daily_plan(conn, row["plan_date"])
+        if plan is not None:
+            plans.append(plan)
+    conn.close()
+    return {"ok": True, "start_date": window_start, "end_date": window_end, "daily_plans": plans}
 
 
 @mcp.tool()
@@ -1435,6 +2710,11 @@ def add_activity(
     description: str = "",
     location: str = "",
     category: str = "",
+    activity_type: str | None = None,
+    city: str = "",
+    location_detail: str = "",
+    is_evergreen: int = 1,
+    status: str = "active",
     weather_sensitive: int = 0,
     physical_intensity: int = 1,
     repeatability_factor: float = 2,
@@ -1450,6 +2730,17 @@ def add_activity(
     if day_parse_error:
         return {"ok": False, "error": day_parse_error}
 
+    normalized_activity_type, activity_type_error = _normalized_enum_value(activity_type, _ACTIVITY_TYPES)
+    if activity_type_error:
+        return {"ok": False, "error": activity_type_error}
+
+    normalized_status, status_error = _normalized_enum_value(status, _ACTIVITY_STATUSES, default="active")
+    if status_error:
+        return {"ok": False, "error": status_error}
+
+    if is_evergreen not in {0, 1}:
+        return {"ok": False, "error": "is_evergreen must be 0 or 1"}
+
     conn = _connect()
     cursor = conn.execute(
         """
@@ -1458,18 +2749,28 @@ def add_activity(
             description,
             location,
             category,
+            activity_type,
+            city,
+            location_detail,
+            is_evergreen,
+            status,
             weather_sensitive,
             physical_intensity,
             repeatability_factor,
             day_of_week_mask
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             title,
             description or None,
             location or None,
             category or None,
+            normalized_activity_type,
+            city.strip() or None,
+            location_detail.strip() or None,
+            is_evergreen,
+            normalized_status,
             weather_sensitive,
             physical_intensity,
             float(repeatability_factor),
@@ -1496,6 +2797,11 @@ def update_activity(
     description: str | None = None,
     location: str | None = None,
     category: str | None = None,
+    activity_type: str | None = None,
+    city: str | None = None,
+    location_detail: str | None = None,
+    is_evergreen: int | None = None,
+    status: str | None = None,
     weather_sensitive: int | None = None,
     physical_intensity: int | None = None,
     repeatability_factor: float | None = None,
@@ -1519,6 +2825,27 @@ def update_activity(
         updates["location"] = location.strip() or None
     if category is not None:
         updates["category"] = category.strip() or None
+    if activity_type is not None:
+        normalized_activity_type, activity_type_error = _normalized_enum_value(activity_type, _ACTIVITY_TYPES)
+        if activity_type_error:
+            conn.close()
+            return {"ok": False, "error": activity_type_error}
+        updates["activity_type"] = normalized_activity_type
+    if city is not None:
+        updates["city"] = city.strip() or None
+    if location_detail is not None:
+        updates["location_detail"] = location_detail.strip() or None
+    if is_evergreen is not None:
+        if is_evergreen not in {0, 1}:
+            conn.close()
+            return {"ok": False, "error": "is_evergreen must be 0 or 1"}
+        updates["is_evergreen"] = is_evergreen
+    if status is not None:
+        normalized_status, status_error = _normalized_enum_value(status, _ACTIVITY_STATUSES)
+        if status_error:
+            conn.close()
+            return {"ok": False, "error": status_error}
+        updates["status"] = normalized_status
     if weather_sensitive is not None:
         updates["weather_sensitive"] = weather_sensitive
     if physical_intensity is not None:

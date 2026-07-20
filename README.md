@@ -9,6 +9,7 @@ It combines:
 
 The assistant can:
 - Build a daily briefing with appointments, active timed events, annual reminders, and activity suggestions
+- Build a separate template-driven planner mode with templates, anchors, and persisted daily plans
 - Include annual recurring reminders on the day-of and in advance
 - Log completed activities and avoid repeating recently completed ones
 - Apply activity-suggestion filters based on readiness, weather sensitivity, rain chance, and temperature
@@ -99,6 +100,12 @@ Keep `settings.local.json` out of source control (it is already git-ignored).
 
 4. Use MCP prompts in Copilot chat to add and manage data (see examples below).
 
+If you already have a local database, rerunning the setup command is also the current way to apply schema additions:
+
+```powershell
+.\.venv\Scripts\python.exe scripts/setup_db.py
+```
+
 ## Run Unit Tests
 
 The test suite uses a temporary SQLite database per test run and only synthetic fixture data.
@@ -143,8 +150,8 @@ After the MCP server is running, you can type prompts like:
 - List annual events status "active"
 - Update annual event id 1 status "inactive"
 - Delete annual event id 1
-- Add activity title "Morning Walk" category "outdoor" weather_sensitive 1 physical_intensity 1 urls ["https://example.com/trail"]
-- Update activity id 1 location "Watershed Trailhead" repeatability_factor 1 available_days ["thursday", "saturday"] urls ["https://example.com/parking", "https://example.com/map"]
+- Add activity title "Morning Walk" category "outdoor" activity_type "landmark" city "Issaquah" location_detail "Watershed Trail" is_evergreen 1 status "active" weather_sensitive 1 physical_intensity 1 urls ["https://example.com/trail"]
+- Update activity id 1 location "Watershed Trailhead" activity_type "landmark" city "Issaquah" location_detail "Trailhead lot" is_evergreen 1 status "active" repeatability_factor 1 available_days ["thursday", "saturday"] urls ["https://example.com/parking", "https://example.com/map"]
 - Give me details for activity 1
 - Give me activity details for "Visit Grateful Bread"
 - Delete activity id 1
@@ -172,6 +179,83 @@ Available MCP tools now include:
 - `update_activity`
 - `delete_activity`
 - `get_activity_details`
+- `add_template`
+- `list_templates`
+- `update_template`
+- `delete_template`
+- `add_template_slot`
+- `list_template_slots`
+- `update_template_slot`
+- `delete_template_slot`
+- `add_anchor`
+- `list_anchors`
+- `update_anchor`
+- `delete_anchor`
+- `generate_anchor_options`
+- `commit_daily_plan`
+- `get_daily_plan`
+- `list_daily_plans`
+
+## Planner Mode
+
+Planner mode currently coexists with the legacy daily briefing.
+
+The current planner flow is:
+1. Create a template.
+2. Add one or more template slots.
+3. Create an anchor that points at the template.
+4. Generate anchor options for a date.
+5. Commit a daily plan for the selected anchor.
+6. Review the persisted plan.
+
+Planner slot filling uses explicit `activity_type` and city data. For `anchor_city` slots, activities must have an explicit city match.
+
+## Creating A Template
+
+Minimal example workflow:
+
+1. Create a template:
+
+```text
+Add template name "Old Town Wander" description "Coffee and walking day"
+```
+
+2. Add slots to the template:
+
+```text
+Add template slot template_id 1 slot_order 1 slot_type "eatery" required 1 location_scope "anchor_city"
+Add template slot template_id 1 slot_order 2 slot_type "landmark" required 0 location_scope "anchor_city"
+Add template slot template_id 1 slot_order 3 slot_type "errand" required 0 location_scope "anchor_city" fallback_slot_type "cozy_task"
+```
+
+3. Create an anchor using that template:
+
+```text
+Add anchor name "Issaquah Morning" city "Issaquah" template_id 1 duration "half_day"
+```
+
+4. Preview anchor choices for a date:
+
+```text
+Generate anchor options for 2026-07-18
+```
+
+5. Commit the plan:
+
+```text
+Commit daily plan for 2026-07-18 selected_anchor_id 1
+```
+
+6. Review the saved plan:
+
+```text
+Get daily plan for 2026-07-18
+```
+
+Notes:
+- `generate_anchor_options` returns mandatory-appointment context when hard appointment rules apply.
+- `commit_daily_plan` stores exactly one plan per date; committing again for the same date replaces the prior plan.
+- Slot filling is currently deterministic and picks the first eligible matching activity.
 
 ## Automatic Weather In Daily Briefing
 
